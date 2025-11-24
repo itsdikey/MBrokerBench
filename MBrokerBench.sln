@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36518.9 d17.14
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MBrokerBench", "MBrokerBench\MBrokerBench.csproj", "{B533F6B1-FDC6-43B9-84C4-33E2B1C58D59}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B533F6B1-FDC6-43B9-84C4-33E2B1C58D59}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B533F6B1-FDC6-43B9-84C4-33E2B1C58D59}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B533F6B1-FDC6-43B9-84C4-33E2B1C58D59}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B533F6B1-FDC6-43B9-84C4-33E2B1C58D59}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {4797CC79-88D2-48EF-A2F6-CD2704C312BD}
+	EndGlobalSection
+EndGlobal

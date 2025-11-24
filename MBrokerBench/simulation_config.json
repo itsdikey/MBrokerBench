@@ -1,0 +1,14 @@
+{
+  "InitialPartitions": [
+    { "Id": "P-A", "ProductionRate": 500, "CurrentLag": 5000 },
+    { "Id": "P-B", "ProductionRate": 300, "CurrentLag": 1000 },
+    { "Id": "P-C", "ProductionRate": 700, "CurrentLag": 7000 },
+    { "Id": "P-D", "ProductionRate": 100, "CurrentLag": 0 }
+  ],
+  "Events": [
+    { "TimeStep": 20, "Type": "change_rate", "PartitionId": "P-C", "ProductionRate": 1400 },
+    { "TimeStep": 40, "Type": "add_partition", "PartitionId": "P-E", "ProductionRate": 200, "CurrentLag": 0 },
+    { "TimeStep": 120, "Type": "remove_partition", "PartitionId": "P-B" }
+  ],
+  "MaxRuntimeSteps": 600
+}
