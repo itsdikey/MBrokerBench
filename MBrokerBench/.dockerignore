@@ -1,0 +1,5 @@
+bin/
+obj/
+**/simulation_config.json
+*.user
+*.vs

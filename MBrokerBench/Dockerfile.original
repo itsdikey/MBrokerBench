@@ -1,0 +1,21 @@
+# Build stage
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+
+# Copy csproj and restore first (improves cache)
+COPY *.csproj ./
+RUN dotnet restore "MBrokerBench.csproj"
+
+# Copy everything and publish
+COPY . ./
+RUN dotnet publish "MBrokerBench.csproj" -c Release -o /app/publish --no-restore
+
+# Runtime stage
+FROM mcr.microsoft.com/dotnet/runtime:8.0
+WORKDIR /app
+COPY --from=build /app/publish .
+
+# Metrics port
+EXPOSE 1234
+
+ENTRYPOINT ["dotnet", "MBrokerBench.dll"]
