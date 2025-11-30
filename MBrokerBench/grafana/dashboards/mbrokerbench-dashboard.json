@@ -1,0 +1,30 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Consumers",
+      "fieldConfig": { "defaults": {} },
+      "targets": [ { "expr": "consumers_total", "refId": "A" } ],
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 }
+    },
+    {
+      "type": "stat",
+      "title": "Total Lag",
+      "fieldConfig": { "defaults": {} },
+      "targets": [ { "expr": "total_system_lag_messages", "refId": "A" } ],
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 }
+    },
+    {
+      "type": "graph",
+      "title": "Partition Rates",
+      "targets": [ { "expr": "partition_production_rate_msgs_per_sec", "refId": "A" } ],
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 }
+    }
+  ],
+  "schemaVersion": 30,
+  "title": "MBrokerBench Dashboard",
+  "version": 1
+}
