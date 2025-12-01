@@ -105,13 +105,22 @@ namespace MBrokerBench
     public interface IPartitionAssignmentStrategy
     {
         double RebalanceTimeSeconds { get; set; }
+        ConsumerGroup? ConsumerGroup { get; set; }
+
         void Assign(List<Partition> partitions, List<Consumer> consumers);
+        Task AutoScale();
     }
 
     // Lag-aware worst-fit assignment (place largest total-lag partitions on least-lagged consumer).
     public class LagAwareWorstFitAssignment : IPartitionAssignmentStrategy
     {
         public double RebalanceTimeSeconds { get; set; }
+        public ConsumerGroup? ConsumerGroup { get; set; }
+
+        public float _rebalanceTimeSeconds = 5.0f; // rebalance blocking time
+        public float _latencySLASeconds = 30.0f;   // SLA window
+        public float _scaleDownUtilizationThreshold = 0.20f; // consider removing consumer if <20% utilized
+        public float _scaleUpHysteresis = 1.05f; // require 5% headroom before scaling up
 
         public void Assign(List<Partition> partitions, List<Consumer> consumers)
         {
@@ -138,6 +147,252 @@ namespace MBrokerBench
 
             Console.WriteLine($"[Assignment] Used LagAwareWorstFit strategy (Rebalance Time: {RebalanceTimeSeconds}s). Consumers={consumers.Count}");
         }
+
+        public Task AutoScale()
+        {
+            if (ConsumerGroup == null)
+            {
+                return Task.CompletedTask;
+            }
+            
+            // Conservative required capacity: rate + lag / SLA
+
+
+            var consumers = ConsumerGroup.Consumers;
+
+            double totalRequiredCapacitySLA = ConsumerGroup.AllPartitions
+                .Sum(p => p.ProductionRate + (double)p.GetTotalLag(_rebalanceTimeSeconds) / _latencySLASeconds);
+
+            int requiredConsumersSLA = (int)Math.Ceiling(totalRequiredCapacitySLA / ConsumerGroup.ConsumerCapacity);
+
+            // Apply hysteresis for scaling up
+            int targetConsumers = consumers.Count;
+            if (requiredConsumersSLA > consumers.Count)
+            {
+                // only scale up if required > current * hysteresis
+                if (requiredConsumersSLA >= Math.Ceiling(consumers.Count * _scaleUpHysteresis))
+                    targetConsumers = requiredConsumersSLA;
+            }
+            else if (requiredConsumersSLA < consumers.Count)
+            {
+                // scale down only if there exists at least one under-utilized consumer
+                var underUtilized = consumers
+                    .Where(c => c.GetCurrentWorkloadRate() < c.MaxCapacity * _scaleDownUtilizationThreshold)
+                    .OrderBy(c => c.GetCurrentWorkloadRate())
+                    .FirstOrDefault();
+
+                if (underUtilized != null)
+                    targetConsumers = consumers.Count - 1;
+            }
+
+            if (targetConsumers > consumers.Count)
+            {
+                int toAdd = targetConsumers - consumers.Count;
+                for (int i = 0; i < toAdd; i++) ConsumerGroup.AddConsumer();
+                ConsumerGroup.Rebalance();
+            }
+            else if (targetConsumers < consumers.Count)
+            {
+                // Remove one under-utilized consumer (safe downscale), then rebalance.
+                var removable = consumers
+                    .Where(c => c.GetCurrentWorkloadRate() < c.MaxCapacity * _scaleDownUtilizationThreshold)
+                    .OrderBy(c => c.GetCurrentWorkloadRate())
+                    .FirstOrDefault();
+
+                if (removable != null)
+                {
+                    ConsumerGroup.RemoveConsumer(removable);
+                    ConsumerGroup.Rebalance();
+                }
+            }
+
+            return Task.CompletedTask;
+        }
+    }
+
+    public class ModifiedWorstFitAssignment : IPartitionAssignmentStrategy
+    {
+        public double RebalanceTimeSeconds { get; set; }
+        public ConsumerGroup? ConsumerGroup { get; set; }
+
+        private const double ScaleDownUtilizationThreshold = 0.20; // Cost-aware threshold
+        private const double ScaleUpHysteresis = 1.05;           // Cost-aware hysteresis
+
+        public void Assign(List<Partition> partitions, List<Consumer> consumers)
+        {
+            if (!consumers.Any()) return;
+
+
+            foreach (var c in consumers)
+            {
+                c.AssignedPartitions.Clear();
+            }
+
+            var unassignedPartitions = new List<Partition>();
+
+            var sortedConsumers = consumers
+                .OrderBy(c => c.GetCurrentTotalLag(RebalanceTimeSeconds))
+                .ToList();
+
+            foreach (var currentConsumer in sortedConsumers)
+            {
+                // Line 4: pset ← partitions assigned to c
+                // Get partitions that were assigned to this consumer in the *previous* state.
+                var pset = partitions
+                    .Where(p => p.AssignedConsumer?.Id == currentConsumer.Id)
+                    .ToList();
+
+                // Line 5: pset ← sort pset in decreasing order (by lag/size)
+                // We sort ascending to match the backward iteration logic (smallest item first)
+                var sortedPSet = pset.OrderBy(p => p.GetTotalLag(RebalanceTimeSeconds)).ToList();
+
+                int successfulPreservationCount = 0;
+
+                // Line 6-13: Iterate over pset from smallest to largest partition to preserve existing assignments
+                for (int i = 0; i < sortedPSet.Count; i++)
+                {
+                    var p = sortedPSet[i];
+
+                    double currentWorkloadRate = currentConsumer.GetCurrentWorkloadRate();
+
+                    // Line 8: result ← N.assignOpenBin(p). Capacity Constraint Check.
+                    if (currentWorkloadRate + p.ProductionRate <= currentConsumer.MaxCapacity)
+                    {
+                        // Line 8 (result true): Keep the partition on this consumer.
+                        currentConsumer.AssignedPartitions.Add(p);
+                        p.AssignedConsumer = currentConsumer; // Update partition reference
+                        successfulPreservationCount++;
+                    }
+                    else
+                    {
+                        // Line 9: if result = false then (Capacity constraint violated)
+                        // Stop assigning remaining (larger) partitions to this consumer.
+                        break; // Line 10: break
+                    }
+                }
+
+                // Line 25: U.extend(pset) (Add remaining, non-preserved partitions to the global unassigned list U)
+                var remainingPSet = sortedPSet.Skip(successfulPreservationCount).ToList();
+                unassignedPartitions.AddRange(remainingPSet);
+
+            }
+
+            var newlyUnassigned = partitions.Where(p => p.AssignedConsumer == null).ToList();
+            var finalU = unassignedPartitions.Union(newlyUnassigned).ToList();
+
+            // Line 27: U ← sort U decreasing order (by lag/size)
+            var sortedFinalU = finalU.OrderByDescending(p => p.GetTotalLag(RebalanceTimeSeconds)).ToList();
+
+            // Line 28: for p ∈ U do
+            foreach (var partition in sortedFinalU)
+            {
+                // 1. Find "safe" consumers (must satisfy capacity constraint).
+                var safeConsumers = consumers
+                    .Where(c => c.GetCurrentWorkloadRate() + partition.ProductionRate <= c.MaxCapacity)
+                    .ToList();
+
+                Consumer targetConsumer;
+
+                if (safeConsumers.Any())
+                {
+                    // Line 29: N.assignBin(p) (MWF: pick consumer that minimizes lag/is the least-loaded bin)
+                    targetConsumer = safeConsumers
+                        .OrderBy(c => c.GetCurrentTotalLag(RebalanceTimeSeconds))
+                        .First();
+                }
+                else
+                {
+                    // Fallback for capacity violation
+                    targetConsumer = consumers
+                        .OrderBy(c => c.GetCurrentWorkloadRate())
+                        .First();
+                }
+
+                // Assign the partition
+                targetConsumer.AssignedPartitions.Add(partition);
+                partition.AssignedConsumer = targetConsumer;
+            } // Line 30: end for
+
+            Console.WriteLine($"[Assignment] Used ModifiedWorstFit (MWF) strategy (Paper-exact logic). Consumers={consumers.Count}. Partitions to reassign: {sortedFinalU.Count}");
+        }
+
+        public Task AutoScale()
+        {
+            if(ConsumerGroup == null)
+                return Task.CompletedTask;
+
+            var consumers = ConsumerGroup.Consumers;
+            var partitions = ConsumerGroup.AllPartitions;
+
+            if (!partitions.Any())
+            {
+                // Simple check: if there's nothing to process, we aim for 0 consumers.
+                // Downscale logic below will handle the safe removal of one consumer at a time.
+                if (consumers.Count > 0)
+                {
+
+                }
+                // downscale everything
+            }
+
+            double totalRateCapacity = partitions.Sum(p => p.ProductionRate);
+            long totalProjectedLag = partitions.Sum(p => p.GetTotalLag(ConsumerGroup.RebalanceTimeSeconds));
+
+            double totalRequiredCapacity = totalRateCapacity + (double)totalProjectedLag / ConsumerGroup.LatencySLASeconds;
+            int requiredConsumers = (int)Math.Ceiling(totalRequiredCapacity / ConsumerGroup.ConsumerCapacity);
+
+            // Handle case where we need at least one consumer if partitions exist
+            if (partitions.Any() && requiredConsumers < 1) requiredConsumers = 1;
+
+            // --- 2. Cost-Aware Hysteresis and Safe Downscale Logic ---
+
+            int targetConsumers = consumers.Count;
+
+            // Scale Up Logic (with Hysteresis)
+            if (requiredConsumers > consumers.Count)
+            {
+                // Only scale up if required capacity exceeds current capacity by the hysteresis factor.
+                if (requiredConsumers >= Math.Ceiling(consumers.Count * ScaleUpHysteresis))
+                    targetConsumers = requiredConsumers;
+            }
+            else if (requiredConsumers < consumers.Count)
+            {
+                // Scale Down Logic (Safe Downscale Check)
+                // Check if we can safely remove one consumer (i.e., if one is sufficiently under-utilized).
+                var underUtilized = consumers
+                    .Where(c => c.GetCurrentWorkloadRate() < c.MaxCapacity * ScaleDownUtilizationThreshold)
+                    .OrderBy(c => c.GetCurrentWorkloadRate())
+                    .FirstOrDefault();
+
+                if (underUtilized != null)
+                    targetConsumers = consumers.Count - 1;
+            }
+
+            if (targetConsumers > consumers.Count)
+            {
+                int toAdd = targetConsumers - consumers.Count;
+                Console.WriteLine($"[AUTOSCALE] Scaling UP by {toAdd} consumers. Required={requiredConsumers}.");
+                for (int i = 0; i < toAdd; i++) ConsumerGroup.AddConsumer();
+                ConsumerGroup.Rebalance();
+            }
+            else if (targetConsumers < consumers.Count)
+            {
+                // Use the same underutilized consumer identified above for removal
+                var removable = consumers
+                    .Where(c => c.GetCurrentWorkloadRate() < c.MaxCapacity * ScaleDownUtilizationThreshold)
+                    .OrderBy(c => c.GetCurrentWorkloadRate())
+                    .FirstOrDefault();
+
+                if (removable != null)
+                {
+                    Console.WriteLine($"[AUTOSCALE] Scaling DOWN by 1 consumer ({removable.Id}). Required={requiredConsumers}.");
+                    ConsumerGroup.RemoveConsumer(removable);
+                    ConsumerGroup.Rebalance();
+                }
+            }
+
+            return Task.CompletedTask;
+        }
     }
 
     public class ConsumerGroup
@@ -146,12 +401,14 @@ namespace MBrokerBench
         public List<Partition> AllPartitions { get; }
         public List<Consumer> Consumers { get; private set; } = new List<Consumer>();
 
+        public double ConsumerCapacity => _consumerCapacity;
+
         private readonly IPartitionAssignmentStrategy _assignmentStrategy;
         private readonly double _consumerCapacity;
-        public double _rebalanceTimeSeconds { get; } = 5.0; // rebalance blocking time
-        public double _latencySLASeconds { get; } = 30.0;   // SLA window
-        private readonly double _scaleUpHysteresis = 1.05; // require 5% headroom before scaling up
-        private readonly double _scaleDownUtilizationThreshold = 0.20; // consider removing consumer if <20% utilized
+
+        public double RebalanceTimeSeconds { get; } = 5.0; // rebalance blocking time
+
+        public double LatencySLASeconds { get; } = 30.0;   // SLA window
 
         public ConsumerGroup(
             string groupId,
@@ -163,13 +420,13 @@ namespace MBrokerBench
             AllPartitions = partitions;
             _consumerCapacity = consumerCapacity;
             _assignmentStrategy = assignmentStrategy;
-
-            _assignmentStrategy.RebalanceTimeSeconds = _rebalanceTimeSeconds;
+            _assignmentStrategy.RebalanceTimeSeconds = RebalanceTimeSeconds;
+            _assignmentStrategy.ConsumerGroup = this;
         }
 
         public Consumer AddConsumer()
         {
-            var newConsumer = new Consumer($"C-{Consumers.Count + 1}", _consumerCapacity);
+            var newConsumer = new Consumer($"C-{Guid.NewGuid()}", _consumerCapacity);
             Consumers.Add(newConsumer);
             MetricsExporter.SetConsumers(Consumers.Count);
             MetricsExporter.IncScaleUp();
@@ -177,7 +434,7 @@ namespace MBrokerBench
             return newConsumer;
         }
 
-        private void RemoveConsumer(Consumer consumer)
+        public void RemoveConsumer(Consumer consumer)
         {
             Console.WriteLine($"[SCALED DOWN] Removing Consumer {consumer.Id}...");
 
@@ -197,7 +454,7 @@ namespace MBrokerBench
         // Rebalance all partitions using the configured strategy.
         public void Rebalance()
         {
-            Console.WriteLine($"--- REBALANCING (Blocking for {_rebalanceTimeSeconds}s) ---");
+            Console.WriteLine($"--- REBALANCING (Blocking for {RebalanceTimeSeconds}s) ---");
             _assignmentStrategy.Assign(AllPartitions, Consumers);
 
             // Update partition metrics labels after rebalance
@@ -218,52 +475,7 @@ namespace MBrokerBench
         // Autoscaling based on ScaleWithLag (SLA-focused), with hysteresis and safe downscale.
         public void Autoscale()
         {
-            // Conservative required capacity: rate + lag / SLA
-            double totalRequiredCapacitySLA = AllPartitions
-                .Sum(p => p.ProductionRate + (double)p.GetTotalLag(_rebalanceTimeSeconds) / _latencySLASeconds);
-
-            int requiredConsumersSLA = (int)Math.Ceiling(totalRequiredCapacitySLA / _consumerCapacity);
-
-            // Apply hysteresis for scaling up
-            int targetConsumers = Consumers.Count;
-            if (requiredConsumersSLA > Consumers.Count)
-            {
-                // only scale up if required > current * hysteresis
-                if (requiredConsumersSLA >= Math.Ceiling(Consumers.Count * _scaleUpHysteresis))
-                    targetConsumers = requiredConsumersSLA;
-            }
-            else if (requiredConsumersSLA < Consumers.Count)
-            {
-                // scale down only if there exists at least one under-utilized consumer
-                var underUtilized = Consumers
-                    .Where(c => c.GetCurrentWorkloadRate() < c.MaxCapacity * _scaleDownUtilizationThreshold)
-                    .OrderBy(c => c.GetCurrentWorkloadRate())
-                    .FirstOrDefault();
-
-                if (underUtilized != null)
-                    targetConsumers = Consumers.Count - 1;
-            }
-
-            if (targetConsumers > Consumers.Count)
-            {
-                int toAdd = targetConsumers - Consumers.Count;
-                for (int i = 0; i < toAdd; i++) AddConsumer();
-                Rebalance();
-            }
-            else if (targetConsumers < Consumers.Count)
-            {
-                // Remove one under-utilized consumer (safe downscale), then rebalance.
-                var removable = Consumers
-                    .Where(c => c.GetCurrentWorkloadRate() < c.MaxCapacity * _scaleDownUtilizationThreshold)
-                    .OrderBy(c => c.GetCurrentWorkloadRate())
-                    .FirstOrDefault();
-
-                if (removable != null)
-                {
-                    RemoveConsumer(removable);
-                    Rebalance();
-                }
-            }
+            _assignmentStrategy.AutoScale();
         }
     }
 
@@ -326,7 +538,7 @@ namespace MBrokerBench
                 .Select(pc => new Partition(pc.Id) { ProductionRate = pc.ProductionRate, CurrentLag = pc.CurrentLag })
                 .ToList();
 
-            IPartitionAssignmentStrategy assignmentStrategy = new LagAwareWorstFitAssignment();
+            IPartitionAssignmentStrategy assignmentStrategy = new ModifiedWorstFitAssignment();
 
             var group = new ConsumerGroup("MyGroup", partitions, ConsumerBaseCapacity, assignmentStrategy);
 
@@ -409,7 +621,7 @@ namespace MBrokerBench
                     .Max(p => p == null ? 0 : p.CurrentLag / (p.AssignedConsumer?.MaxCapacity ?? ConsumerBaseCapacity));
 
                 Console.WriteLine($"Total System Lag: {totalLag} messages");
-                Console.WriteLine($"Max Estimated Latency (Worst-Case): {maxLagTime:F2} seconds (Target: {group._latencySLASeconds}s)");
+                Console.WriteLine($"Max Estimated Latency (Worst-Case): {maxLagTime:F2} seconds (Target: {group.LatencySLASeconds}s)");
 
                 // Update metrics
                 MetricsExporter.SetTotalLag(totalLag);

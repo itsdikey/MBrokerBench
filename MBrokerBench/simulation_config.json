@@ -6,7 +6,7 @@
     { "Id": "P-D", "ProductionRate": 100, "CurrentLag": 0 }
   ],
   "Events": [
-    { "TimeStep": 20, "Type": "change_rate", "PartitionId": "P-C", "ProductionRate": 1400 },
+    { "TimeStep": 20, "Type": "change_rate", "PartitionId": "P-C", "ProductionRate": 900 },
     { "TimeStep": 40, "Type": "add_partition", "PartitionId": "P-E", "ProductionRate": 200, "CurrentLag": 0 },
     { "TimeStep": 120, "Type": "remove_partition", "PartitionId": "P-B" }
   ],
