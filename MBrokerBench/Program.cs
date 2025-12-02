@@ -34,8 +34,8 @@ namespace MBrokerBench
     public class Partition
     {
         public string Id { get; }
-        public long CurrentLag { get; set; }
-        public double ProductionRate { get; set; } // Messages/sec
+        public long CurrentLag { get; set; } // Messages or bytes pending consumption
+        public double ProductionRate { get; set; } // Messages(or bytes)/sec
 
         // Consumer currently assigned to this partition.
         public Consumer? AssignedConsumer { get; set; }
@@ -82,6 +82,8 @@ namespace MBrokerBench
         {
             return AssignedPartitions.Sum(p => p.GetTotalLag(rebalanceTimeSeconds));
         }
+
+        public double RemainingCapacity => MaxCapacity - GetCurrentWorkloadRate();
 
         // Consume messages for a given time step, reducing lag.
         // Consume from highest-lag partitions first (fair and reduces SLA violations).
@@ -218,8 +220,15 @@ namespace MBrokerBench
         private const double ScaleDownUtilizationThreshold = 0.20; // Cost-aware threshold
         private const double ScaleUpHysteresis = 1.05;           // Cost-aware hysteresis
 
+        private const double CapacityExcessFactor = 5.0 / 6.0; //  C = 5/6 * C
+
         public void Assign(List<Partition> partitions, List<Consumer> consumers)
         {
+            if (ConsumerGroup == null)
+            {
+                return;
+            }
+
             if (!consumers.Any()) return;
 
 
@@ -231,16 +240,15 @@ namespace MBrokerBench
             var unassignedPartitions = new List<Partition>();
 
             var sortedConsumers = consumers
-                .OrderBy(c => c.GetCurrentTotalLag(RebalanceTimeSeconds))
+                .OrderBy(c => c.GetCurrentTotalLag(RebalanceTimeSeconds)) // cumulative partition sort
                 .ToList();
 
             foreach (var currentConsumer in sortedConsumers)
             {
                 // Line 4: pset ← partitions assigned to c
                 // Get partitions that were assigned to this consumer in the *previous* state.
-                var pset = partitions
-                    .Where(p => p.AssignedConsumer?.Id == currentConsumer.Id)
-                    .ToList();
+                var pset = new HashSet<Partition>(partitions
+                    .Where(p => p.AssignedConsumer?.Id == currentConsumer.Id));
 
                 // Line 5: pset ← sort pset in decreasing order (by lag/size)
                 // We sort ascending to match the backward iteration logic (smallest item first)
@@ -249,7 +257,7 @@ namespace MBrokerBench
                 int successfulPreservationCount = 0;
 
                 // Line 6-13: Iterate over pset from smallest to largest partition to preserve existing assignments
-                for (int i = 0; i < sortedPSet.Count; i++)
+                for (int i = sortedPSet.Count-1; i>=0; i--) 
                 {
                     var p = sortedPSet[i];
 
@@ -269,12 +277,50 @@ namespace MBrokerBench
                         // Stop assigning remaining (larger) partitions to this consumer.
                         break; // Line 10: break
                     }
+
+                    pset.Remove(p); // Line 12: pset.remove(p)
                 }
 
-                // Line 25: U.extend(pset) (Add remaining, non-preserved partitions to the global unassigned list U)
-                var remainingPSet = sortedPSet.Skip(successfulPreservationCount).ToList();
-                unassignedPartitions.AddRange(remainingPSet);
+                if(pset.Count == 0) // Line 14: if pset.size() = 0 then
+                {
+                    // All partitions preserved for this consumer
+                    continue;
+                }
 
+
+                //Line 17-24: Reassign remaining partitions in pset
+                var remainingPSet = sortedPSet.Where(x => pset.Contains(x)).ToList();
+                sortedPSet = remainingPSet.OrderByDescending(p => p.GetTotalLag(RebalanceTimeSeconds)).ToList();
+
+                var remainingPSetHash = new HashSet<Partition>(sortedPSet);
+
+                var newConsumer = ConsumerGroup.AddConsumer(); // Line 17 createConsumer();
+
+                foreach (var p in sortedPSet) // Line 18: for p ∈ pset do
+                {
+                    double currentWorkloadRate = newConsumer.GetCurrentWorkloadRate();
+
+                    // Line 19: result ← N.assign(c, p). Capacity Constraint Check.
+                    if (currentWorkloadRate + p.ProductionRate <= newConsumer.MaxCapacity)
+                    {
+                        // Line 20 (result true): Keep the partition on this consumer.
+                        newConsumer.AssignedPartitions.Add(p);
+                        p.AssignedConsumer = newConsumer; // Update partition reference
+                        successfulPreservationCount++;
+
+                    }
+                    else
+                    {
+                        // Line 9: if result = false then (Capacity constraint violated)
+                        // Stop assigning remaining (larger) partitions to this consumer.
+                        break; // Line 10: break
+                    }
+
+                    remainingPSetHash.Remove(p); // Line 23: pset.remove(p)
+                }
+
+                // Line 25: U.extend(pset) (add unassigned partitions to U)
+                unassignedPartitions.AddRange(remainingPSetHash);
             }
 
             var newlyUnassigned = partitions.Where(p => p.AssignedConsumer == null).ToList();
@@ -295,17 +341,30 @@ namespace MBrokerBench
 
                 if (safeConsumers.Any())
                 {
-                    // Line 29: N.assignBin(p) (MWF: pick consumer that minimizes lag/is the least-loaded bin)
+                    // Line 29: N.assignBin(p) (MWF: pick consumer that minimizes is)
                     targetConsumer = safeConsumers
-                        .OrderBy(c => c.GetCurrentTotalLag(RebalanceTimeSeconds))
+                        .OrderByDescending(c => c.RemainingCapacity)
                         .First();
                 }
                 else
                 {
-                    // Fallback for capacity violation
-                    targetConsumer = consumers
-                        .OrderBy(c => c.GetCurrentWorkloadRate())
-                        .First();
+                    var created = ConsumerGroup.AddConsumer();
+
+                    // Refresh the local consumer list reference
+                    consumers = ConsumerGroup.Consumers;
+
+                    // If the new consumer can take the partition, use it
+                    if (created.GetCurrentWorkloadRate() + partition.ProductionRate <= created.MaxCapacity)
+                    {
+                        targetConsumer = created;
+                    }
+                    else
+                    {
+                        // Partition too large for a single consumer or other unexpected condition — pick worst fit available consumer
+                        targetConsumer = consumers
+                            .OrderByDescending(c => c.RemainingCapacity)
+                            .First();
+                    }
                 }
 
                 // Assign the partition
@@ -330,7 +389,17 @@ namespace MBrokerBench
                 // Downscale logic below will handle the safe removal of one consumer at a time.
                 if (consumers.Count > 0)
                 {
+                    var removable = consumers
+                    .Where(c => c.GetCurrentWorkloadRate() < c.MaxCapacity * ScaleDownUtilizationThreshold)
+                    .OrderBy(c => c.GetCurrentWorkloadRate())
+                    .FirstOrDefault();
 
+                    if (removable != null)
+                    {
+                        Console.WriteLine($"[AUTOSCALE] Scaling DOWN by 1 consumer ({removable.Id}).");
+                        ConsumerGroup.RemoveConsumer(removable);
+                        ConsumerGroup.Rebalance();
+                    }
                 }
                 // downscale everything
             }
@@ -338,8 +407,8 @@ namespace MBrokerBench
             double totalRateCapacity = partitions.Sum(p => p.ProductionRate);
             long totalProjectedLag = partitions.Sum(p => p.GetTotalLag(ConsumerGroup.RebalanceTimeSeconds));
 
-            double totalRequiredCapacity = totalRateCapacity + (double)totalProjectedLag / ConsumerGroup.LatencySLASeconds;
-            int requiredConsumers = (int)Math.Ceiling(totalRequiredCapacity / ConsumerGroup.ConsumerCapacity);
+            double totalRequiredCapacity = totalRateCapacity + totalProjectedLag / ConsumerGroup.LatencySLASeconds;
+            int requiredConsumers = (int)Math.Ceiling(totalRequiredCapacity / (CapacityExcessFactor * ConsumerGroup.ConsumerCapacity));
 
             // Handle case where we need at least one consumer if partitions exist
             if (partitions.Any() && requiredConsumers < 1) requiredConsumers = 1;
@@ -348,14 +417,7 @@ namespace MBrokerBench
 
             int targetConsumers = consumers.Count;
 
-            // Scale Up Logic (with Hysteresis)
-            if (requiredConsumers > consumers.Count)
-            {
-                // Only scale up if required capacity exceeds current capacity by the hysteresis factor.
-                if (requiredConsumers >= Math.Ceiling(consumers.Count * ScaleUpHysteresis))
-                    targetConsumers = requiredConsumers;
-            }
-            else if (requiredConsumers < consumers.Count)
+            if (requiredConsumers < consumers.Count)
             {
                 // Scale Down Logic (Safe Downscale Check)
                 // Check if we can safely remove one consumer (i.e., if one is sufficiently under-utilized).
@@ -482,7 +544,7 @@ namespace MBrokerBench
     public class BrokerSimulator
     {
         private const double TimeStepSeconds = 1.0;
-        private const double ConsumerBaseCapacity = 1000.0; // Msgs/sec per consumer
+        private const double ConsumerBaseCapacity = 1000.0; // bytes/sec per consumer
 
         public static void Main()
         {
@@ -644,11 +706,13 @@ namespace MBrokerBench
                     Console.WriteLine($"  {consumer.Id}: Rate={consumer.GetCurrentWorkloadRate():F0} msgs/s. Util={utilization:F1}%. Partitions: {string.Join(", ", consumer.AssignedPartitions.Select(p => p.Id))}");
                 }
 
-                if (totalLag == 0 && step > 10)
-                {
-                    Console.WriteLine("\nAll partitions cleared lag. Simulation Complete.");
-                    break;
-                }
+                Thread.Sleep(200);
+
+                //if (totalLag == 0 && step > 10)
+                //{
+                //    Console.WriteLine("\nAll partitions cleared lag. Simulation Complete.");
+                //    break;
+                //}
             }
             Console.ReadLine();
 
