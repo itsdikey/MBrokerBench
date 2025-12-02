@@ -1,4 +1,10 @@
 {
+  "Configs": {
+
+  }
+}
+
+{
   "InitialPartitions": [
     { "Id": "P-A", "ProductionRate": 500, "CurrentLag": 5000 },
     { "Id": "P-B", "ProductionRate": 300, "CurrentLag": 1000 },
