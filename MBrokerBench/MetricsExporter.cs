@@ -17,6 +17,13 @@ namespace MBrokerBench
         private static Gauge? PartitionLagGauge;
         private static Gauge? PartitionRateGauge;
 
+        // Total production rate metric
+        private static Gauge? TotalProductionRateGauge;
+
+        // Partition reassignment metrics
+        private static Counter? PartitionReassignmentsCounter; // global counter
+        private static Counter? PartitionReassignmentsPerPartitionCounter; // label: partition
+
         // Partition -> assigned consumer mapping to clear previous label metric
         private static readonly Dictionary<string, string?> _partitionAssignedConsumer = new();
         private static Gauge? PartitionAssignedGauge; // labels: partition, consumer
@@ -37,6 +44,13 @@ namespace MBrokerBench
                 PartitionLagGauge = Metrics.CreateGauge("partition_lag_messages", "Partition lag in messages", new GaugeConfiguration { LabelNames = new[] { "partition" } });
                 PartitionRateGauge = Metrics.CreateGauge("partition_production_rate_msgs_per_sec", "Partition production rate (msgs/sec)", new GaugeConfiguration { LabelNames = new[] { "partition" } });
                 PartitionAssignedGauge = Metrics.CreateGauge("partition_assigned_consumer", "Partition assigned consumer (1 if assigned)", new GaugeConfiguration { LabelNames = new[] { "partition", "consumer" } });
+
+                // Total production rate
+                TotalProductionRateGauge = Metrics.CreateGauge("total_system_production_rate_msgs_per_sec", "Total system production rate (msgs/sec)");
+
+                // Create reassignment counters
+                PartitionReassignmentsCounter = Metrics.CreateCounter("partition_reassignments_total", "Total number of partition reassignments to a different consumer");
+                PartitionReassignmentsPerPartitionCounter = Metrics.CreateCounter("partition_reassignments", "Partition reassignments by partition", new CounterConfiguration { LabelNames = new[] { "partition" } });
 
                 ConsumerUtilizationGauge = Metrics.CreateGauge("consumer_utilization_percent", "Per-consumer utilization in percent", new GaugeConfiguration { LabelNames = new[] { "consumer" } });
                 ConsumerAssignedCountGauge = Metrics.CreateGauge("consumer_assigned_partitions_count", "Number of partitions assigned to a consumer", new GaugeConfiguration { LabelNames = new[] { "consumer" } });
@@ -92,6 +106,11 @@ namespace MBrokerBench
             TotalLagGauge?.Set(lag);
         }
 
+        public static void SetTotalProductionRate(double rate)
+        {
+            TotalProductionRateGauge?.Set(rate);
+        }
+
         public static void SetPartition(string id, long lag, double rate)
         {
             PartitionLagGauge?.WithLabels(id).Set(lag);
@@ -111,6 +130,13 @@ namespace MBrokerBench
                 if (_partitionAssignedConsumer.TryGetValue(partitionId, out var prev) && !string.IsNullOrEmpty(prev) && prev != consumerId)
                 {
                     PartitionAssignedGauge?.WithLabels(partitionId, prev).Set(0);
+
+                    // Increment reassignment counters only when switching from one consumer to a different non-null consumer
+                    if (!string.IsNullOrEmpty(consumerId))
+                    {
+                        PartitionReassignmentsCounter?.Inc();
+                        PartitionReassignmentsPerPartitionCounter?.WithLabels(partitionId).Inc();
+                    }
                 }
 
                 if (!string.IsNullOrEmpty(consumerId))
