@@ -120,7 +120,7 @@ namespace MBrokerBench
                 scaleFactor: 1.0 // Use real capacity for actual assignment
             );
 
-            Console.WriteLine($"[PaperStrategy] Assigned {partitions.Count} partitions to {consumers.Count} consumers using Least-Loaded heuristic.");
+            Console.WriteLine($"[ScaleWithLag] Assigned {partitions.Count} partitions to {consumers.Count} consumers using Least-Loaded heuristic.");
         }
 
         /// <summary>
@@ -233,8 +233,8 @@ namespace MBrokerBench
 
         /// <summary>
         /// Implements "Function assignmentViolatesTheSLA".
-                    /// Checks if any current consumer violates the Latency or Capacity constraints.
-                    /// </summary>
+        /// Checks if any current consumer violates the Latency or Capacity constraints.
+        /// </summary>
         private bool CheckSLAViolation(List<Consumer> consumers, double mu, double w_sla, double f)
         {
             // Line 1: foreach m_j in G_m
@@ -741,7 +741,7 @@ namespace MBrokerBench
 
         public double RebalanceTimeSeconds { get; } = 5.0; // rebalance blocking time
 
-        public double LatencySLASeconds { get; } = 30.0;   // SLA window
+        public double LatencySLASeconds { get; } = 10.0;   // SLA window
 
         public ConsumerGroup(
             string groupId,
@@ -788,7 +788,31 @@ namespace MBrokerBench
         public void Rebalance()
         {
             Console.WriteLine($"--- REBALANCING (Blocking for {RebalanceTimeSeconds}s) ---");
+
+            //We are emulating rebalance time by blocking partition production for that duration if reassigned.
+            //This will cause backlog to appear on reassigned partitions.
+            var partitionConsumerMap = new Dictionary<string, string?>();
+
+            foreach (var consumer in Consumers) 
+            {
+                foreach (var partition in consumer.AssignedPartitions) 
+                {
+                    partitionConsumerMap[partition.Id] = consumer.Id;
+                }
+            }
+
             _assignmentStrategy.Assign(AllPartitions, Consumers);
+
+            foreach(var partition in AllPartitions)
+            {
+                if (partitionConsumerMap.TryGetValue(partition.Id, out var previousConsumerId))
+                {
+                    if (previousConsumerId != partition.AssignedConsumer?.Id)
+                    {
+                        partition.Produce(RebalanceTimeSeconds);
+                    }
+                }
+            }
 
             // Update partition metrics labels after rebalance
             foreach (var p in AllPartitions)
@@ -1009,7 +1033,7 @@ namespace MBrokerBench
             foreach (var p in partitions)
                 baseProductionRates[p.Id] = p.ProductionRate;
 
-            IPartitionAssignmentStrategy assignmentStrategy = new ModifiedWorstFitAssignment();
+            IPartitionAssignmentStrategy assignmentStrategy = new PaperLeastLoadedBinPackStrategy();
 
             var group = new ConsumerGroup("MyGroup", partitions, ConsumerBaseCapacity, assignmentStrategy);
 
