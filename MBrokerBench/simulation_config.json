@@ -8,15 +8,15 @@
         "Count": 32,
         "ProductionRateRange": {
           "Min": 100,
-          "Max": 750
+          "Max": 950
         },
         "RateVariability": 0.25,
         "RateRefreshIntervalSteps": 50,
         "InitialLagRange": {
           "Min": 0,
-          "Max": 10000
+          "Max": 500
         },
-        "MaxRuntimeSteps": 600
+        "MaxRuntimeSteps": 100000
       }
     },
 

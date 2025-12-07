@@ -3,12 +3,15 @@ services:
   mbrokerbench:
     build: .
     container_name: mbrokerbench
+    volumes:
+        - ./export_csv:/app/export_csv 
     ports:
       - "1234:1234" # metrics endpoint
     restart: unless-stopped
     environment:
         - ASPNETCORE_ENVIRONMENT=Development
-        - PUSHGATEWAY_URL=http://pushgateway:9091   
+        - PUSHGATEWAY_URL=http://pushgateway:9091  
+        - PROMETHEUS_URL=http://prometheus:9090
 
   prometheus:
     image: prom/prometheus:latest

@@ -14,9 +14,9 @@
         "RateRefreshIntervalSteps": 50,
         "InitialLagRange": {
           "Min": 0,
-          "Max": 10000
+          "Max": 500
         },
-        "MaxRuntimeSteps": 600
+        "MaxRuntimeSteps": 100000
       }
     },
 
