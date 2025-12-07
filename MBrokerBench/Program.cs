@@ -1,4 +1,5 @@
 ﻿using System.Text.Json;
+using System.Threading.Tasks;
 
 namespace MBrokerBench
 {
@@ -133,11 +134,11 @@ namespace MBrokerBench
 
             var consumers = ConsumerGroup.Consumers;
             var partitions = ConsumerGroup.AllPartitions;
-            double mu = ConsumerGroup.ConsumerCapacity;     // Average processing capacity 
+            double mu_capacity = ConsumerGroup.ConsumerCapacity;     // Average processing capacity 
             double w_sla = ConsumerGroup.LatencySLASeconds; // Desired latency 
 
             // 1. Call Procedure scaleNeeded 
-            ScaleAction action = GetScaleNeeded(partitions, consumers, mu, w_sla);
+            ScaleAction action = GetScaleNeeded(partitions, consumers, mu_capacity, w_sla);
 
             // 2. Logic from Procedure 'doScale' 
                         // Depending on action, we calculate G_next (target consumer count) and apply changes.
@@ -147,7 +148,7 @@ namespace MBrokerBench
             if (action == ScaleAction.UP || action == ScaleAction.REASS)
             {
                 // Calculate G_(t+1) using Least-Loaded with f_up 
-                int requiredCount = SimulateLeastLoaded(totalLagPartitions, mu, w_sla, F_Up);
+                int requiredCount = SimulateLeastLoaded(totalLagPartitions, mu_capacity, w_sla, F_Up);
 
                 if (requiredCount > consumers.Count)
                 {
@@ -167,7 +168,7 @@ namespace MBrokerBench
             else if (action == ScaleAction.DOWN)
             {
                 // Calculate G_(t+1) using Least-Loaded with f_down
-                int requiredCount = SimulateLeastLoaded(totalLagPartitions, mu, w_sla, F_Down);
+                int requiredCount = SimulateLeastLoaded(totalLagPartitions, mu_capacity, w_sla, F_Down);
 
                 // Safety: Ensure we have at least 1 consumer if there is work
                 if (requiredCount < 1 && partitions.Any()) requiredCount = 1;
@@ -263,12 +264,16 @@ namespace MBrokerBench
         /// Returns the NUMBER of consumers (bins) required.
         /// Used in "scaleNeeded" to plan for next interval.
         /// </summary>
-        private int SimulateLeastLoaded(List<Partition> partitions, double mu, double w_sla, double f)
+        /// <param name="muConsumerCapacity">The processing capacity of each consumer (bin).</param>
+        /// <param name="f">The scaling factor (f_up or f_down).</param>
+        /// <param name="partitions">The list of partitions to pack.</param>
+        /// <param name="w_sla">The target SLA</param>
+        private int SimulateLeastLoaded(List<Partition> partitions, double muConsumerCapacity, double w_sla, double f)
         {
             // We simulate packing partitions into theoretical bins.
             // We start with 0 bins and add as needed, OR we can try to fit into current count?
             // The paper implies finding the "Minimal set of replicas"
-                        // So we simulate filling bins from scratch to find the count.
+            // So we simulate filling bins from scratch to find the count.
 
             List<double> binLoads = new List<double>(); // Stores current rate (lambda) of each bin
             List<double> binLags = new List<double>();  // Stores current lag of each bin
@@ -295,7 +300,7 @@ namespace MBrokerBench
                     double projectedLag = binLags[i] + pLag;
                     double projectedRate = binLoads[i] + pRate;
 
-                    bool fits = (projectedLag < mu * w_sla * f) && (projectedRate < mu * f);
+                    bool fits = (projectedLag < muConsumerCapacity * w_sla * f) && (projectedRate < muConsumerCapacity * f);
 
                     if (fits)
                     {
@@ -318,7 +323,7 @@ namespace MBrokerBench
                 {
                     // Create new bin (Scale up simulation)
                     // Check if partition itself is too big for a single consumer (Corner case)
-                    if (pLag > mu * w_sla * f || pRate > mu * f)
+                    if (pLag > muConsumerCapacity * w_sla * f || pRate > muConsumerCapacity * f)
                     {
                         // It requires a dedicated consumer (or exceeds capacity completely)
                         // We add a bin, but strictly it violates SLA. We pack it anyway to count it.
@@ -840,12 +845,16 @@ namespace MBrokerBench
         private const double TimeStepSeconds = 1.0;
         private const double ConsumerBaseCapacity = 1000.0; // bytes/sec per consumer
 
-        public static void Main()
+        public static async Task Main()
         {
             Console.WriteLine("Starting Kafka Autoscaling Simulation (Config-Driven)...");
 
-            // Start metrics endpoint
-            MetricsExporter.Init(1234);
+            IPartitionAssignmentStrategy assignmentStrategy = new ModifiedWorstFitAssignment();
+
+            // Start metrics endpoint with strategy/run labels (from environment)
+            var strategyEnv = assignmentStrategy.GetType().Name ?? System.Environment.GetEnvironmentVariable("STRATEGY");
+            var runIdEnv = System.Environment.GetEnvironmentVariable("RUN_ID") ?? DateTimeOffset.UtcNow.Subtract(DateTimeOffset.UnixEpoch).TotalSeconds.ToString();//current unix epoch 
+            MetricsExporter.Init(1234, strategyEnv, runIdEnv);
 
             // Load config
             var configPath = Path.Combine(AppContext.BaseDirectory, "simulation_config.json");
@@ -1033,8 +1042,6 @@ namespace MBrokerBench
             foreach (var p in partitions)
                 baseProductionRates[p.Id] = p.ProductionRate;
 
-            IPartitionAssignmentStrategy assignmentStrategy = new PaperLeastLoadedBinPackStrategy();
-
             var group = new ConsumerGroup("MyGroup", partitions, ConsumerBaseCapacity, assignmentStrategy);
 
             // Start with 1 consumer
@@ -1142,7 +1149,11 @@ namespace MBrokerBench
                     .DefaultIfEmpty()
                     .Max(p => p == null ? 0 : p.CurrentLag / (p.AssignedConsumer?.MaxCapacity ?? ConsumerBaseCapacity));
 
-                Console.WriteLine($"Total System Lag: {totalLag} messages");
+                var totalProductionRate = group.AllPartitions.Sum(p => p.ProductionRate);
+                var averageProductionRate = group.AllPartitions.Count > 0 ? totalProductionRate / group.AllPartitions.Count : 0.0;
+
+
+                Console.WriteLine($"Total System Lag: {totalLag} messages. Total Production Rate: {totalProductionRate:F1} msgs/s. Average Production Rate: {averageProductionRate:F1} msgs/s");
                 Console.WriteLine($"Max Estimated Latency (Worst-Case): {maxLagTime:F2} seconds (Target: {group.LatencySLASeconds}s)");
 
                 // Update metrics
@@ -1154,8 +1165,6 @@ namespace MBrokerBench
                     MetricsExporter.SetPartitionAssignment(p.Id, p.AssignedConsumer?.Id);
                 }
 
-                // Set total production rate metric
-                double totalProductionRate = group.AllPartitions.Sum(p => p.ProductionRate);
                 MetricsExporter.SetTotalProductionRate(totalProductionRate);
 
                 foreach (var consumer in group.Consumers)
@@ -1168,7 +1177,9 @@ namespace MBrokerBench
                 {
                     double utilization = (consumer.GetCurrentWorkloadRate() / consumer.MaxCapacity) * 100;
 
-                    Console.WriteLine($"  {consumer.Id}: Rate={consumer.GetCurrentWorkloadRate():F0} msgs/s. Util={utilization:F1}%. Partitions: {string.Join(", ", consumer.AssignedPartitions.Select(p => p.Id))}");
+                    double consumerLag = consumer.GetCurrentTotalLag(0);
+
+                    Console.WriteLine($"  {consumer.Id}: Messages={consumerLag:F0} msg Rate={consumer.GetCurrentWorkloadRate():F0} msgs/s. Util={utilization:F1}%. Partitions: {string.Join(", ", consumer.AssignedPartitions.Select(p => p.Id))}");
                 }
 
                 Thread.Sleep(200);
@@ -1179,6 +1190,9 @@ namespace MBrokerBench
                 //    break;
                 //}
             }
+
+            await MetricsExporter.Finalizer();
+
             Console.ReadLine();
 
             while (true)

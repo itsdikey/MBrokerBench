@@ -1,4 +1,5 @@
 ﻿using Prometheus;
+using System.Threading.Tasks;
 
 namespace MBrokerBench
 {
@@ -7,6 +8,11 @@ namespace MBrokerBench
         private static readonly object _lock = new object();
         private static KestrelMetricServer? _server;
         private static MetricPusher? _metricPusher;
+
+        // Default grouping labels for experiments
+        private static string _strategy = "unknown";
+        private static string _runId = "unknown";
+
         // Core metrics
         private static Gauge? ConsumersGauge;
         private static Gauge? TotalLagGauge;
@@ -21,42 +27,46 @@ namespace MBrokerBench
         private static Gauge? TotalProductionRateGauge;
 
         // Partition reassignment metrics
-        private static Counter? PartitionReassignmentsCounter; // global counter
-        private static Counter? PartitionReassignmentsPerPartitionCounter; // label: partition
+        private static Counter? PartitionReassignmentsCounter; // labeled by strategy/run
+        private static Counter? PartitionReassignmentsPerPartitionCounter; // label: partition, strategy, run
 
         // Partition -> assigned consumer mapping to clear previous label metric
         private static readonly Dictionary<string, string?> _partitionAssignedConsumer = new();
-        private static Gauge? PartitionAssignedGauge; // labels: partition, consumer
+        private static Gauge? PartitionAssignedGauge; // labels: partition, consumer, strategy, run
 
         // Consumer metrics (label: consumer)
         private static Gauge? ConsumerUtilizationGauge;
         private static Gauge? ConsumerAssignedCountGauge;
 
-        public static void Init(int port = 1234)
+        public static void Init(int port = 1234, string? strategy = null, string? runId = null)
         {
             try
             {
-                ConsumersGauge = Metrics.CreateGauge("consumers_total", "Number of active consumers");
-                TotalLagGauge = Metrics.CreateGauge("total_system_lag_messages", "Total system lag in messages");
-                ScaleUpCounter = Metrics.CreateCounter("scale_up_total", "Total number of scale-up events");
-                ScaleDownCounter = Metrics.CreateCounter("scale_down_total", "Total number of scale-down events");
+                // Determine default labels
+                _strategy = strategy ?? Environment.GetEnvironmentVariable("STRATEGY") ?? "unknown";
+                _runId = runId ?? Environment.GetEnvironmentVariable("RUN_ID") ?? Guid.NewGuid().ToString();
 
-                PartitionLagGauge = Metrics.CreateGauge("partition_lag_messages", "Partition lag in messages", new GaugeConfiguration { LabelNames = new[] { "partition" } });
-                PartitionRateGauge = Metrics.CreateGauge("partition_production_rate_msgs_per_sec", "Partition production rate (msgs/sec)", new GaugeConfiguration { LabelNames = new[] { "partition" } });
-                PartitionAssignedGauge = Metrics.CreateGauge("partition_assigned_consumer", "Partition assigned consumer (1 if assigned)", new GaugeConfiguration { LabelNames = new[] { "partition", "consumer" } });
+                ConsumersGauge = Metrics.CreateGauge("consumers_total", "Number of active consumers", new GaugeConfiguration { LabelNames = new[] { "strategy", "run" } });
+                TotalLagGauge = Metrics.CreateGauge("total_system_lag_messages", "Total system lag in messages", new GaugeConfiguration { LabelNames = new[] { "strategy", "run" } });
+                ScaleUpCounter = Metrics.CreateCounter("scale_up_total", "Total number of scale-up events", new CounterConfiguration { LabelNames = new[] { "strategy", "run" } });
+                ScaleDownCounter = Metrics.CreateCounter("scale_down_total", "Total number of scale-down events", new CounterConfiguration { LabelNames = new[] { "strategy", "run" } });
+
+                PartitionLagGauge = Metrics.CreateGauge("partition_lag_messages", "Partition lag in messages", new GaugeConfiguration { LabelNames = new[] { "partition", "strategy", "run" } });
+                PartitionRateGauge = Metrics.CreateGauge("partition_production_rate_msgs_per_sec", "Partition production rate (msgs/sec)", new GaugeConfiguration { LabelNames = new[] { "partition", "strategy", "run" } });
+                PartitionAssignedGauge = Metrics.CreateGauge("partition_assigned_consumer", "Partition assigned consumer (1 if assigned)", new GaugeConfiguration { LabelNames = new[] { "partition", "consumer", "strategy", "run" } });
 
                 // Total production rate
-                TotalProductionRateGauge = Metrics.CreateGauge("total_system_production_rate_msgs_per_sec", "Total system production rate (msgs/sec)");
+                TotalProductionRateGauge = Metrics.CreateGauge("total_system_production_rate_msgs_per_sec", "Total system production rate (msgs/sec)", new GaugeConfiguration { LabelNames = new[] { "strategy", "run" } });
 
                 // Create reassignment counters
-                PartitionReassignmentsCounter = Metrics.CreateCounter("partition_reassignments_total", "Total number of partition reassignments to a different consumer");
-                PartitionReassignmentsPerPartitionCounter = Metrics.CreateCounter("partition_reassignments", "Partition reassignments by partition", new CounterConfiguration { LabelNames = new[] { "partition" } });
+                PartitionReassignmentsCounter = Metrics.CreateCounter("partition_reassignments_total", "Total number of partition reassignments to a different consumer", new CounterConfiguration { LabelNames = new[] { "strategy", "run" } });
+                PartitionReassignmentsPerPartitionCounter = Metrics.CreateCounter("partition_reassignments", "Partition reassignments by partition", new CounterConfiguration { LabelNames = new[] { "partition", "strategy", "run" } });
 
-                ConsumerUtilizationGauge = Metrics.CreateGauge("consumer_utilization_percent", "Per-consumer utilization in percent", new GaugeConfiguration { LabelNames = new[] { "consumer" } });
-                ConsumerAssignedCountGauge = Metrics.CreateGauge("consumer_assigned_partitions_count", "Number of partitions assigned to a consumer", new GaugeConfiguration { LabelNames = new[] { "consumer" } });
+                ConsumerUtilizationGauge = Metrics.CreateGauge("consumer_utilization_percent", "Per-consumer utilization in percent", new GaugeConfiguration { LabelNames = new[] { "consumer", "strategy", "run" } });
+                ConsumerAssignedCountGauge = Metrics.CreateGauge("consumer_assigned_partitions_count", "Number of partitions assigned to a consumer", new GaugeConfiguration { LabelNames = new[] { "consumer", "strategy", "run" } });
                 _server = new KestrelMetricServer(hostname: "0.0.0.0", port: port);
                 _server.Start();
-                Console.WriteLine($"Prometheus metric server started on http://0.0.0.0:{port}/metrics (accessible from host at http://localhost:{port}/metrics)");
+                Console.WriteLine($"Prometheus metric server started on http://0.0.0.0:{port}/metrics (strategy={_strategy} run={_runId})");
 
                 var pushUrl = Environment.GetEnvironmentVariable("PUSHGATEWAY_URL");
                 if (!string.IsNullOrEmpty(pushUrl))
@@ -70,6 +80,7 @@ namespace MBrokerBench
                         });
 
                         pusher.Start();
+                        _metricPusher = pusher;
                         Console.WriteLine($"MetricPushServer started to {pushUrl}");
                     }
                     catch (Exception ex)
@@ -98,23 +109,23 @@ namespace MBrokerBench
 
         public static void SetConsumers(int count)
         {
-            ConsumersGauge?.Set(count);
+            ConsumersGauge?.WithLabels(_strategy, _runId).Set(count);
         }
 
         public static void SetTotalLag(long lag)
         {
-            TotalLagGauge?.Set(lag);
+            TotalLagGauge?.WithLabels(_strategy, _runId).Set(lag);
         }
 
         public static void SetTotalProductionRate(double rate)
         {
-            TotalProductionRateGauge?.Set(rate);
+            TotalProductionRateGauge?.WithLabels(_strategy, _runId).Set(rate);
         }
 
         public static void SetPartition(string id, long lag, double rate)
         {
-            PartitionLagGauge?.WithLabels(id).Set(lag);
-            PartitionRateGauge?.WithLabels(id).Set(rate);
+            PartitionLagGauge?.WithLabels(id, _strategy, _runId).Set(lag);
+            PartitionRateGauge?.WithLabels(id, _strategy, _runId).Set(rate);
             lock (_lock)
             {
                 if (!_partitionAssignedConsumer.ContainsKey(id))
@@ -129,19 +140,19 @@ namespace MBrokerBench
                 // Clear previous assignment gauge if different
                 if (_partitionAssignedConsumer.TryGetValue(partitionId, out var prev) && !string.IsNullOrEmpty(prev) && prev != consumerId)
                 {
-                    PartitionAssignedGauge?.WithLabels(partitionId, prev).Set(0);
+                    PartitionAssignedGauge?.WithLabels(partitionId, prev, _strategy, _runId).Set(0);
 
                     // Increment reassignment counters only when switching from one consumer to a different non-null consumer
                     if (!string.IsNullOrEmpty(consumerId))
                     {
-                        PartitionReassignmentsCounter?.Inc();
-                        PartitionReassignmentsPerPartitionCounter?.WithLabels(partitionId).Inc();
+                        PartitionReassignmentsCounter?.WithLabels(_strategy, _runId).Inc();
+                        PartitionReassignmentsPerPartitionCounter?.WithLabels(partitionId, _strategy, _runId).Inc();
                     }
                 }
 
                 if (!string.IsNullOrEmpty(consumerId))
                 {
-                    PartitionAssignedGauge?.WithLabels(partitionId, consumerId).Set(1);
+                    PartitionAssignedGauge?.WithLabels(partitionId, consumerId, _strategy, _runId).Set(1);
                     _partitionAssignedConsumer[partitionId] = consumerId;
                 }
                 else
@@ -153,18 +164,29 @@ namespace MBrokerBench
 
         public static void SetConsumerMetrics(string consumerId, double utilizationPercent, int assignedCount)
         {
-            ConsumerUtilizationGauge?.WithLabels(consumerId).Set(utilizationPercent);
-            ConsumerAssignedCountGauge?.WithLabels(consumerId).Set(assignedCount);
+            ConsumerUtilizationGauge?.WithLabels(consumerId, _strategy, _runId).Set(utilizationPercent);
+            ConsumerAssignedCountGauge?.WithLabels(consumerId, _strategy, _runId).Set(assignedCount);
         }
 
         public static void IncScaleUp()
         {
-            ScaleUpCounter?.Inc();
+            ScaleUpCounter?.WithLabels(_strategy, _runId).Inc();
         }
 
         public static void IncScaleDown()
         {
-            ScaleDownCounter?.Inc();
+            ScaleDownCounter?.WithLabels(_strategy, _runId).Inc();
+        }
+
+        public static async Task Finalizer()
+        {
+            await PrometheusExporter.ExportAllMetricsAsync(
+                prometheusUrl: Environment.GetEnvironmentVariable("PROMETHEUS_URL") ?? "http://localhost:9090",
+                strategy: _strategy,
+                runId: _runId,
+                startUtc: DateTime.UtcNow.AddHours(-1),
+                endUtc: DateTime.UtcNow,
+                step: "1s");
         }
     }
 }
