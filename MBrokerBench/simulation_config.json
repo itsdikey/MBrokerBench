@@ -8,7 +8,41 @@
         "Count": 32,
         "ProductionRateRange": {
           "Min": 100,
-          "Max": 950
+          "Max": 1500
+        },
+        "RateVariability": 0.25,
+        "RateRefreshIntervalSteps": 50,
+        "InitialLagRange": {
+          "Min": 0,
+          "Max": 500
+        },
+        "MaxRuntimeSteps": 100000
+      }
+    },
+    {
+      "Name": "WorstFitTest2",
+      "InitialPartitionsConfig": {
+        "Count": 116,
+        "ProductionRateRange": {
+          "Min": 100,
+          "Max": 750
+        },
+        "RateVariability": 0.25,
+        "RateRefreshIntervalSteps": 50,
+        "InitialLagRange": {
+          "Min": 0,
+          "Max": 500
+        },
+        "MaxRuntimeSteps": 100000
+      }
+    },
+    {
+      "Name": "WorstFitTest3",
+      "InitialPartitionsConfig": {
+        "Count": 144,
+        "ProductionRateRange": {
+          "Min": 100,
+          "Max": 750
         },
         "RateVariability": 0.25,
         "RateRefreshIntervalSteps": 50,

@@ -1,492 +1,9 @@
-﻿using System.Text.Json;
+﻿using MBrokerBench.Models;
+using System.Text.Json;
 using System.Threading.Tasks;
 
 namespace MBrokerBench
 {
-    // Simulation runtime classes (models moved to MBrokerBench/Models/SimulationModels.cs)
-
-    public class Partition
-    {
-        public string Id { get; }
-        public long CurrentLag { get; set; } // Messages or bytes pending consumption
-        public double ProductionRate { get; set; } // Messages(or bytes)/sec
-
-        // Consumer currently assigned to this partition.
-        public Consumer? AssignedConsumer { get; set; }
-
-        public Partition(string id)
-        {
-            Id = id;
-        }
-
-        // Simulate new messages arriving over a time step.
-        public void Produce(double timeStepSeconds)
-        {
-            int count = (int)Math.Floor(ProductionRate * timeStepSeconds);
-            CurrentLag += count;
-        }
-
-        // Total lag including projected messages during a rebalance window.
-        public long GetTotalLag(double rebalanceTimeSeconds)
-        {
-            return CurrentLag + (long)Math.Ceiling(ProductionRate * rebalanceTimeSeconds);
-        }
-    }
-
-    public class Consumer
-    {
-        public string Id { get; }
-        public double MaxCapacity { get; }
-        public List<Partition> AssignedPartitions { get; } = new List<Partition>();
-
-        public Consumer(string id, double maxCapacity)
-        {
-            Id = id;
-            MaxCapacity = maxCapacity;
-        }
-
-        // Sum of production rates from assigned partitions.
-        public double GetCurrentWorkloadRate()
-        {
-            return AssignedPartitions.Sum(p => p.ProductionRate);
-        }
-
-        // Sum of total lag for assigned partitions (used by lag-aware strategies).
-        public long GetCurrentTotalLag(double rebalanceTimeSeconds)
-        {
-            return AssignedPartitions.Sum(p => p.GetTotalLag(rebalanceTimeSeconds));
-        }
-
-        public double RemainingCapacity => MaxCapacity - GetCurrentWorkloadRate();
-
-        // Consume messages for a given time step, reducing lag.
-        // Consume from highest-lag partitions first (fair and reduces SLA violations).
-        public void Consume(double timeStepSeconds)
-        {
-            double availableWork = MaxCapacity * timeStepSeconds;
-
-            foreach (var partition in AssignedPartitions.OrderByDescending(p => p.CurrentLag))
-            {
-                if (availableWork <= 0) break;
-
-                long consumed = (long)Math.Min(partition.CurrentLag, (long)Math.Floor(availableWork));
-
-                partition.CurrentLag -= consumed;
-                availableWork -= consumed;
-            }
-        }
-    }
-
-    public class PaperLeastLoadedBinPackStrategy : IPartitionAssignmentStrategy
-    {
-        // Configuration from Paper Section: "The Proposed Binpack-Based Autoscaler"
-        public double RebalanceTimeSeconds { get; set; }
-        public ConsumerGroup? ConsumerGroup { get; set; }
-
-        // Parameters f_up and f_down as defined in the paper 
-                    // f_up: Scale up threshold (e.g., 0.8). Ensures bin is not used to full capacity.
-        private const double F_Up = 0.8;
-
-        // f_down: Scale down threshold (e.g., 0.4). Controls frequency of scale down.
-        private const double F_Down = 0.4;
-
-        // Enums to represent the decision output of 'scaleNeeded'
-        private enum ScaleAction { NONE, UP, DOWN, REASS }
-
-        /// <summary>
-        /// Implements the actual assignment of partitions to consumers.
-        /// Corresponds to the execution logic inside 'Procedure doScale'
-                    /// It uses 'Total Lag' (Eq. 8) which includes rebalancing time.
-                    /// </summary>
-        public void Assign(List<Partition> partitions, List<Consumer> consumers)
-        {
-            if (ConsumerGroup == null || !consumers.Any()) return;
-
-            // Clear existing assignments (The paper does not support stickiness/incremental rebalancing)
-            // "This makes the incremental rebalancing protocol not suitable for latency-awareness"
-            foreach (var c in consumers) c.AssignedPartitions.Clear();
-            foreach (var p in partitions) p.AssignedConsumer = null;
-
-            // Calculate Lag_total for all partitions (Eq. 8) 
-                        // Lag_total = Existing Lag + (Arrival Rate * Rebalance Time)
-                        // In the code: p.GetTotalLag(tr) handles this calculation.
-
-            // Execute Least-Loaded Packing using the FULL capacity (metrics not scaled by f_up/f_down during actual assignment)
-            // The paper implies we pack into the available consumers optimizing for balance.
-            PerformLeastLoadedBinPack(
-                partitions,
-                consumers,
-                ConsumerGroup.ConsumerCapacity,
-                ConsumerGroup.LatencySLASeconds,
-                scaleFactor: 1.0 // Use real capacity for actual assignment
-            );
-
-            Console.WriteLine($"[ScaleWithLag] Assigned {partitions.Count} partitions to {consumers.Count} consumers using Least-Loaded heuristic.");
-        }
-
-        /// <summary>
-        /// Implements "Algorithm 1: ScaleWithLag".
-                    /// This is the main entry point triggered every decision interval.
-                    /// </summary>
-        public Task AutoScale()
-        {
-            if (ConsumerGroup == null) return Task.CompletedTask;
-
-            var consumers = ConsumerGroup.Consumers;
-            var partitions = ConsumerGroup.AllPartitions;
-            double mu_capacity = ConsumerGroup.ConsumerCapacity;     // Average processing capacity 
-            double w_sla = ConsumerGroup.LatencySLASeconds; // Desired latency 
-
-            // 1. Call Procedure scaleNeeded 
-            ScaleAction action = GetScaleNeeded(partitions, consumers, mu_capacity, w_sla);
-
-            // 2. Logic from Procedure 'doScale' 
-                        // Depending on action, we calculate G_next (target consumer count) and apply changes.
-
-            List<Partition> totalLagPartitions = partitions; // In simulation, we treat these with TotalLag logic
-
-            if (action == ScaleAction.UP || action == ScaleAction.REASS)
-            {
-                // Calculate G_(t+1) using Least-Loaded with f_up 
-                int requiredCount = SimulateLeastLoaded(totalLagPartitions, mu_capacity, w_sla, F_Up);
-
-                if (requiredCount > consumers.Count)
-                {
-                    // Scale UP by difference
-                    int toAdd = requiredCount - consumers.Count;
-                    Console.WriteLine($"[Algorithm 1] Action: UP. Adding {toAdd} replicas.");
-                    for (int i = 0; i < toAdd; i++) ConsumerGroup.AddConsumer();
-                    ConsumerGroup.Rebalance();
-                }
-                else if (action == ScaleAction.REASS)
-                {
-                    // Trigger Rebalance without changing count 
-                    Console.WriteLine($"[Algorithm 1] Action: REASS. Rebalancing existing replicas.");
-                    ConsumerGroup.Rebalance();
-                }
-            }
-            else if (action == ScaleAction.DOWN)
-            {
-                // Calculate G_(t+1) using Least-Loaded with f_down
-                int requiredCount = SimulateLeastLoaded(totalLagPartitions, mu_capacity, w_sla, F_Down);
-
-                // Safety: Ensure we have at least 1 consumer if there is work
-                if (requiredCount < 1 && partitions.Any()) requiredCount = 1;
-
-                if (requiredCount < consumers.Count)
-                {
-                    // Scale DOWN by difference
-                    int toRemove = consumers.Count - requiredCount;
-                    Console.WriteLine($"[Algorithm 1] Action: DOWN. Removing {toRemove} replicas.");
-
-                    // Remove the 'Least Loaded' consumers to minimize disruption, or just last ones.
-                    // The paper relies on rebalance to fix assignment, so removal order is less critical 
-                    // but removing empty ones is safer.
-                    for (int i = 0; i < toRemove; i++)
-                    {
-                        // Simple removal logic
-                        if (ConsumerGroup.Consumers.Any())
-                            ConsumerGroup.RemoveConsumer(ConsumerGroup.Consumers.Last());
-                    }
-                    ConsumerGroup.Rebalance();
-                }
-            }
-
-            return Task.CompletedTask;
-        }
-
-        /// <summary>
-        /// Implements "Procedure scaleNeeded".
-                    /// Determines if UP, DOWN, or REASS (Reassign) is required.
-                    /// </summary>
-        private ScaleAction GetScaleNeeded(List<Partition> partitions, List<Consumer> currentConsumers, double mu, double w_sla)
-        {
-            int currentCount = currentConsumers.Count;
-
-            // Line 2: G_(t+1) <- Least-Loaded(..., f_up)
-                        // Note: The paper uses current metrics (lambda', lag') for this check, not totalLag (which is for doScale).
-                        // However, usually autoscalers project lag. We will use the standard lag here.
-            int neededForUp = SimulateLeastLoaded(partitions, mu, w_sla, F_Up);
-
-            // Line 3: if |G_(t+1)| > |G_t| then return UP 
-            if (neededForUp > currentCount)
-            {
-                return ScaleAction.UP;
-            }
-
-            // Line 6: G_(t+1) <- Least-Loaded(..., f_down) 
-            int neededForDown = SimulateLeastLoaded(partitions, mu, w_sla, F_Down);
-
-            // Line 7: if |G_(t+1)| < |G_t| then return DOWN 
-            if (neededForDown < currentCount)
-            {
-                return ScaleAction.DOWN;
-            }
-
-            // Line 10: if assignmentViolatesTheSLA(...) return REASS 
-            if (CheckSLAViolation(currentConsumers, mu, w_sla, F_Up))
-            {
-                return ScaleAction.REASS;
-            }
-
-            return ScaleAction.NONE;
-        }
-
-        /// <summary>
-        /// Implements "Function assignmentViolatesTheSLA".
-        /// Checks if any current consumer violates the Latency or Capacity constraints.
-        /// </summary>
-        private bool CheckSLAViolation(List<Consumer> consumers, double mu, double w_sla, double f)
-        {
-            // Line 1: foreach m_j in G_m
-            foreach (var consumer in consumers)
-            {
-                double lag_mj = consumer.AssignedPartitions.Sum(p => p.CurrentLag); // lag defined in Eq 3
-                double lambda_mj = consumer.AssignedPartitions.Sum(p => p.ProductionRate); // lambda defined in Eq 4 
-
-                // Line 2: Check constraints 
-                            // Constraint 1: Lag > Capacity * SLA * f
-                bool lagViolation = lag_mj > (mu * w_sla * f);
-
-                // Constraint 2: ArrivalRate > Capacity * f
-                bool capacityViolation = lambda_mj > (mu * f);
-
-                if (lagViolation || capacityViolation)
-                {
-                    return true; // Return true 
-                }
-            }
-            return false;
-        }
-
-        /// <summary>
-        /// Implements the "Least-Loaded" bin pack heuristic simulation.
-        /// Returns the NUMBER of consumers (bins) required.
-        /// Used in "scaleNeeded" to plan for next interval.
-        /// </summary>
-        /// <param name="muConsumerCapacity">The processing capacity of each consumer (bin).</param>
-        /// <param name="f">The scaling factor (f_up or f_down).</param>
-        /// <param name="partitions">The list of partitions to pack.</param>
-        /// <param name="w_sla">The target SLA</param>
-        private int SimulateLeastLoaded(List<Partition> partitions, double muConsumerCapacity, double w_sla, double f)
-        {
-            // We simulate packing partitions into theoretical bins.
-            // We start with 0 bins and add as needed, OR we can try to fit into current count?
-            // The paper implies finding the "Minimal set of replicas"
-            // So we simulate filling bins from scratch to find the count.
-
-            List<double> binLoads = new List<double>(); // Stores current rate (lambda) of each bin
-            List<double> binLags = new List<double>();  // Stores current lag of each bin
-
-            // Sort partitions descending by Lag/Load to optimize packing (Standard Bin Pack practice)
-            // Though "Least-Loaded" refers to the bin selection, sorting items helps.
-            var sortedPartitions = partitions.OrderByDescending(p => p.GetTotalLag(RebalanceTimeSeconds)).ToList();
-
-            foreach (var p in sortedPartitions)
-            {
-                double pLag = p.GetTotalLag(RebalanceTimeSeconds);
-                double pRate = p.ProductionRate;
-
-                // Find the "Least Loaded" bin that can fit this partition
-                // Least Loaded here means the bin with the lowest utilization (balancing load) 
-
-                int bestBinIndex = -1;
-                double minLoadFound = double.MaxValue;
-
-                for (int i = 0; i < binLoads.Count; i++)
-                {
-                    // Check if this bin can accept the partition without violating constraints 
-                                // Constraint: NewLag < mu * w_sla * f  AND  NewRate < mu * f
-                    double projectedLag = binLags[i] + pLag;
-                    double projectedRate = binLoads[i] + pRate;
-
-                    bool fits = (projectedLag < muConsumerCapacity * w_sla * f) && (projectedRate < muConsumerCapacity * f);
-
-                    if (fits)
-                    {
-                        // Heuristic: Pick the bin with the lowest current load (Least-Loaded)
-                        if (binLoads[i] < minLoadFound)
-                        {
-                            minLoadFound = binLoads[i];
-                            bestBinIndex = i;
-                        }
-                    }
-                }
-
-                if (bestBinIndex != -1)
-                {
-                    // Add to existing bin
-                    binLoads[bestBinIndex] += pRate;
-                    binLags[bestBinIndex] += pLag;
-                }
-                else
-                {
-                    // Create new bin (Scale up simulation)
-                    // Check if partition itself is too big for a single consumer (Corner case)
-                    if (pLag > muConsumerCapacity * w_sla * f || pRate > muConsumerCapacity * f)
-                    {
-                        // It requires a dedicated consumer (or exceeds capacity completely)
-                        // We add a bin, but strictly it violates SLA. We pack it anyway to count it.
-                    }
-                    binLoads.Add(pRate);
-                    binLags.Add(pLag);
-                }
-            }
-
-            return binLoads.Count;
-        }
-
-        /// <summary>
-        /// Executes the actual Least-Loaded Heuristic on REAL consumers objects.
-        /// Used inside 'Assign'.
-        /// </summary>
-        private void PerformLeastLoadedBinPack(
-            List<Partition> partitions,
-            List<Consumer> consumers,
-            double mu,
-            double w_sla,
-            double scaleFactor)
-        {
-            // Sort partitions to assign heavy items first
-            var sortedPartitions = partitions.OrderByDescending(p => p.GetTotalLag(RebalanceTimeSeconds)).ToList();
-
-            foreach (var p in sortedPartitions)
-            {
-                // Find "Least Loaded" consumer that satisfies constraints
-                // "Least-Loaded heuristic ... maintains uniform and balanced load"
-
-                var candidates = consumers.Where(c =>
-                {
-                    // Check constraints (Eq. 5)
-                    double newWorkload = c.GetCurrentWorkloadRate() + p.ProductionRate;
-                    double newLag = c.GetCurrentTotalLag(RebalanceTimeSeconds) + p.GetTotalLag(RebalanceTimeSeconds);
-
-                    return newWorkload <= (mu * scaleFactor) &&
-                           newLag <= (mu * w_sla * scaleFactor);
-                }).ToList();
-
-                Consumer? target = null;
-
-                if (candidates.Any())
-                {
-                    // Select the one with the lowest current workload (Least Loaded)
-                    // This corresponds to 'Worst Fit' (Maximize remaining capacity)
-                    target = candidates.OrderBy(c => c.GetCurrentWorkloadRate()).First();
-                }
-                else
-                {
-                    // Fallback: If no consumer satisfies SLA (overload), pick the absolute least loaded 
-                    // to spread the pain, even if it violates constraints.
-                    target = consumers.OrderBy(c => c.GetCurrentWorkloadRate()).FirstOrDefault();
-                }
-
-                if (target != null)
-                {
-                    target.AssignedPartitions.Add(p);
-                    p.AssignedConsumer = target;
-                }
-            }
-        }
-    }
-
-    // Lag-aware worst-fit assignment (place largest total-lag partitions on least-lagged consumer).
-    public class LagAwareWorstFitAssignment : IPartitionAssignmentStrategy
-    {
-        public double RebalanceTimeSeconds { get; set; }
-        public ConsumerGroup? ConsumerGroup { get; set; }
-
-        public float _rebalanceTimeSeconds = 5.0f; // rebalance blocking time
-        public float _latencySLASeconds = 30.0f;   // SLA window
-        public float _scaleDownUtilizationThreshold = 0.20f; // consider removing consumer if <20% utilized
-        public float _scaleUpHysteresis = 1.05f; // require 5% headroom before scaling up
-
-        public void Assign(List<Partition> partitions, List<Consumer> consumers)
-        {
-            if (!consumers.Any()) return;
-
-            // Clear consumers' partitions BEFORE assigning to avoid duplicates.
-            foreach (var c in consumers)
-                c.AssignedPartitions.Clear();
-
-            foreach (var p in partitions)
-                p.AssignedConsumer = null;
-
-            var sortedPartitions = partitions.OrderByDescending(p => p.GetTotalLag(RebalanceTimeSeconds)).ToList();
-
-            foreach (var partition in sortedPartitions)
-            {
-                Consumer targetConsumer = consumers
-                    .OrderBy(c => c.GetCurrentTotalLag(RebalanceTimeSeconds))
-                    .First();
-
-                targetConsumer.AssignedPartitions.Add(partition);
-                partition.AssignedConsumer = targetConsumer;
-            }
-
-            Console.WriteLine($"[Assignment] Used LagAwareWorstFit strategy (Rebalance Time: {RebalanceTimeSeconds}s). Consumers={consumers.Count}");
-        }
-
-        public Task AutoScale()
-        {
-            if (ConsumerGroup == null)
-            {
-                return Task.CompletedTask;
-            }
-            
-            // Conservative required capacity: rate + lag / SLA
-
-
-            var consumers = ConsumerGroup.Consumers;
-
-            double totalRequiredCapacitySLA = ConsumerGroup.AllPartitions
-                .Sum(p => p.ProductionRate + (double)p.GetTotalLag(_rebalanceTimeSeconds) / _latencySLASeconds);
-
-            int requiredConsumersSLA = (int)Math.Ceiling(totalRequiredCapacitySLA / ConsumerGroup.ConsumerCapacity);
-
-            // Apply hysteresis for scaling up
-            int targetConsumers = consumers.Count;
-            if (requiredConsumersSLA > consumers.Count)
-            {
-                // only scale up if required > current * hysteresis
-                if (requiredConsumersSLA >= Math.Ceiling(consumers.Count * _scaleUpHysteresis))
-                    targetConsumers = requiredConsumersSLA;
-            }
-            else if (requiredConsumersSLA < consumers.Count)
-            {
-                // scale down only if there exists at least one under-utilized consumer
-                var underUtilized = consumers
-                    .Where(c => c.GetCurrentWorkloadRate() < c.MaxCapacity * _scaleDownUtilizationThreshold)
-                    .OrderBy(c => c.GetCurrentWorkloadRate())
-                    .FirstOrDefault();
-
-                if (underUtilized != null)
-                    targetConsumers = consumers.Count - 1;
-            }
-
-            if (targetConsumers > consumers.Count)
-            {
-                int toAdd = targetConsumers - consumers.Count;
-                for (int i = 0; i < toAdd; i++) ConsumerGroup.AddConsumer();
-                ConsumerGroup.Rebalance();
-            }
-            else if (targetConsumers < consumers.Count)
-            {
-                // Remove one under-utilized consumer (safe downscale), then rebalance.
-                var removable = consumers
-                    .Where(c => c.GetCurrentWorkloadRate() < c.MaxCapacity * _scaleDownUtilizationThreshold)
-                    .OrderBy(c => c.GetCurrentWorkloadRate())
-                    .FirstOrDefault();
-
-                if (removable != null)
-                {
-                    ConsumerGroup.RemoveConsumer(removable);
-                    ConsumerGroup.Rebalance();
-                }
-            }
-
-            return Task.CompletedTask;
-        }
-    }
 
     public class ModifiedWorstFitAssignment : IPartitionAssignmentStrategy
     {
@@ -494,7 +11,6 @@ namespace MBrokerBench
         public ConsumerGroup? ConsumerGroup { get; set; }
 
         private const double ScaleDownUtilizationThreshold = 0.20; // Cost-aware threshold
-        private const double ScaleUpHysteresis = 1.05;           // Cost-aware hysteresis
 
         private const double CapacityExcessFactor = 5.0 / 6.0; //  C = 5/6 * C
 
@@ -661,8 +177,6 @@ namespace MBrokerBench
 
             if (!partitions.Any())
             {
-                // Simple check: if there's nothing to process, we aim for 0 consumers.
-                // Downscale logic below will handle the safe removal of one consumer at a time.
                 if (consumers.Count > 0)
                 {
                     var removable = consumers
@@ -677,7 +191,6 @@ namespace MBrokerBench
                         ConsumerGroup.Rebalance();
                     }
                 }
-                // downscale everything
             }
 
             double totalRateCapacity = partitions.Sum(p => p.ProductionRate);
@@ -733,123 +246,458 @@ namespace MBrokerBench
         }
     }
 
-    public class ConsumerGroup
+    public class CostCentricModifiedWorstFitAssignment : IPartitionAssignmentStrategy
     {
-        public string GroupId { get; }
-        public List<Partition> AllPartitions { get; }
-        public List<Consumer> Consumers { get; private set; } = new List<Consumer>();
+        public double RebalanceTimeSeconds { get; set; }
+        public ConsumerGroup? ConsumerGroup { get; set; }
 
-        public double ConsumerCapacity => _consumerCapacity;
+        private const double ScaleDownUtilizationThreshold = 0.20; // Cost-aware threshold
 
-        private readonly IPartitionAssignmentStrategy _assignmentStrategy;
-        private readonly double _consumerCapacity;
+        private const double CapacityExcessFactor = 1;// 5.0 / 6.0; //  C = 5/6 * C
 
-        public double RebalanceTimeSeconds { get; } = 5.0; // rebalance blocking time
-
-        public double LatencySLASeconds { get; } = 10.0;   // SLA window
-
-        public ConsumerGroup(
-            string groupId,
-            List<Partition> partitions,
-            double consumerCapacity,
-            IPartitionAssignmentStrategy assignmentStrategy)
+        private ConsumerProfile GetOptimalProfile(double requiredCapacity)
         {
-            GroupId = groupId;
-            AllPartitions = partitions;
-            _consumerCapacity = consumerCapacity;
-            _assignmentStrategy = assignmentStrategy;
-            _assignmentStrategy.RebalanceTimeSeconds = RebalanceTimeSeconds;
-            _assignmentStrategy.ConsumerGroup = this;
-        }
+            if (ConsumerGroup == null) return ConsumerProfiles.Medium;
 
-        public Consumer AddConsumer()
-        {
-            var newConsumer = new Consumer($"C-{Guid.NewGuid()}", _consumerCapacity);
-            Consumers.Add(newConsumer);
-            MetricsExporter.SetConsumers(Consumers.Count);
-            MetricsExporter.IncScaleUp();
-            Console.WriteLine($"[SCALED UP] New Consumer {newConsumer.Id} added. Total: {Consumers.Count}");
-            return newConsumer;
-        }
+            // 1. Filter profiles that are large enough to hold the load (with safety margin)
+            var candidates = ConsumerGroup.ConsumerProfiles
+                .Where(p => p.MaxCapacity * CapacityExcessFactor >= requiredCapacity)
+                .OrderBy(p => p.CostPerSecond) // Cheapest first
+                .ToList();
 
-        public void RemoveConsumer(Consumer consumer)
-        {
-            Console.WriteLine($"[SCALED DOWN] Removing Consumer {consumer.Id}...");
-
-            // Unassign partitions so the next rebalance will reassign them.
-            foreach (var partition in consumer.AssignedPartitions.ToList())
+            // 2. If valid candidates exist, pick the cheapest.
+            if (candidates.Any())
             {
-                partition.AssignedConsumer = null;
-                consumer.AssignedPartitions.Remove(partition);
+                return candidates.First();
             }
 
-            Consumers.Remove(consumer);
-            MetricsExporter.SetConsumers(Consumers.Count);
-            MetricsExporter.IncScaleDown();
-            Console.WriteLine($"[SCALED DOWN] Consumer {consumer.Id} removed. Total: {Consumers.Count}");
+            // 3. If NONE fit (load is huge), pick the largest available profile 
+            // (we will likely need multiple, but start with largest).
+            return ConsumerGroup.ConsumerProfiles.OrderByDescending(p => p.MaxCapacity).First();
         }
 
-        // Rebalance all partitions using the configured strategy.
-        public void Rebalance()
+        public void Assign(List<Partition> partitions, List<Consumer> consumers)
         {
-            Console.WriteLine($"--- REBALANCING (Blocking for {RebalanceTimeSeconds}s) ---");
+            if (ConsumerGroup == null || !consumers.Any()) return;
 
-            //We are emulating rebalance time by blocking partition production for that duration if reassigned.
-            //This will cause backlog to appear on reassigned partitions.
-            var partitionConsumerMap = new Dictionary<string, string?>();
+            // Clear current mappings
+            foreach (var c in consumers) c.AssignedPartitions.Clear();
 
-            foreach (var consumer in Consumers) 
+            var unassignedPartitions = new List<Partition>();
+
+            // Sort consumers by total lag (heuristic to process heavy consumers first)
+            var sortedConsumers = consumers
+                .OrderByDescending(c => c.GetCurrentTotalLag(RebalanceTimeSeconds))
+                .ToList();
+
+            // --- PHASE 1: Preserve existing assignments where possible ---
+            foreach (var currentConsumer in sortedConsumers)
             {
-                foreach (var partition in consumer.AssignedPartitions) 
-                {
-                    partitionConsumerMap[partition.Id] = consumer.Id;
-                }
-            }
+                // Get partitions previously assigned to this specific consumer ID
+                var pset = partitions
+                    .Where(p => p.AssignedConsumer?.Id == currentConsumer.Id)
+                    .OrderBy(p => p.GetTotalLag(RebalanceTimeSeconds)) // Smallest first
+                    .ToList();
 
-            _assignmentStrategy.Assign(AllPartitions, Consumers);
+                var keptPartitions = new List<Partition>();
+                var ejectedPartitions = new List<Partition>();
 
-            foreach(var partition in AllPartitions)
-            {
-                if (partitionConsumerMap.TryGetValue(partition.Id, out var previousConsumerId))
+                double currentLoad = 0;
+
+                // Greedy packing: Keep as many as fit
+                foreach (var p in pset)
                 {
-                    if (previousConsumerId != partition.AssignedConsumer?.Id)
+                    if (currentLoad + p.ProductionRate <= currentConsumer.MaxCapacity * CapacityExcessFactor)
                     {
-                        partition.Produce(RebalanceTimeSeconds);
+                        currentConsumer.AssignedPartitions.Add(p);
+                        p.AssignedConsumer = currentConsumer;
+                        currentLoad += p.ProductionRate;
+                        keptPartitions.Add(p);
+                    }
+                    else
+                    {
+                        ejectedPartitions.Add(p);
+                    }
+                }
+
+                // If partitions were ejected, we need a new home for them.
+                // In MWF, we often create a new consumer immediately for ejected sets to maintain locality.
+                if (ejectedPartitions.Any())
+                {
+                    // HETEROGENEOUS LOGIC: 
+                    // Calculate exactly how much capacity we need for the ejected items
+                    double requiredCap = ejectedPartitions.Sum(p => p.ProductionRate);
+
+                    // Pick the best profile (Small/Medium/Large) for this specific overflow
+                    var bestProfile = GetOptimalProfile(requiredCap);
+
+                    var newConsumer = ConsumerGroup.AddConsumer(bestProfile.Name);
+
+                    // Assign ejected partitions to the new consumer
+                    foreach (var ep in ejectedPartitions)
+                    {
+                        // Note: If the new consumer is still too small (Corner case), 
+                        // they go to unassigned.
+                        if (newConsumer.GetCurrentWorkloadRate() + ep.ProductionRate <= newConsumer.MaxCapacity)
+                        {
+                            newConsumer.AssignedPartitions.Add(ep);
+                            ep.AssignedConsumer = newConsumer;
+                        }
+                        else
+                        {
+                            unassignedPartitions.Add(ep);
+                        }
                     }
                 }
             }
 
-            // Update partition metrics labels after rebalance
-            foreach (var p in AllPartitions)
+            // --- PHASE 2: Handle Completely Unassigned / Orphaned Partitions ---
+            var newlyUnassigned = partitions.Where(p => p.AssignedConsumer == null).ToList();
+            var finalU = unassignedPartitions.Union(newlyUnassigned)
+                                             .OrderByDescending(p => p.GetTotalLag(RebalanceTimeSeconds))
+                                             .ToList();
+
+            foreach (var partition in finalU)
             {
-                MetricsExporter.SetPartition(p.Id, p.CurrentLag, p.ProductionRate);
-                MetricsExporter.SetPartitionAssignment(p.Id, p.AssignedConsumer?.Id);
+                // Try to fit into ANY existing consumer (Modified Best Fit)
+                // We prioritize consumers that have space, sorting by "Cost Efficiency" implies 
+                // filling the expensive ones first to get our money's worth.
+                var candidate = consumers
+                    .Where(c => c.RemainingCapacity >= partition.ProductionRate)
+                    .OrderBy(c => c.RemainingCapacity) // Worst Fit (leaves large gaps for others) or Best Fit?
+                    .FirstOrDefault();
+
+                if (candidate != null)
+                {
+                    candidate.AssignedPartitions.Add(partition);
+                    partition.AssignedConsumer = candidate;
+                }
+                else
+                {
+                    // No one has space. Spin up a new Consumer just for this partition 
+                    // (and potentially subsequent ones).
+                    // We look ahead slightly? No, keeping it simple: match this partition size.
+                    var bestProfile = GetOptimalProfile(partition.ProductionRate);
+                    var newConsumer = ConsumerGroup.AddConsumer(bestProfile.Name);
+
+                    newConsumer.AssignedPartitions.Add(partition);
+                    partition.AssignedConsumer = newConsumer;
+
+                    // Update our local list so subsequent iterations see this new consumer
+                    consumers = ConsumerGroup.Consumers;
+                }
             }
 
-            // Update consumer metrics after rebalance
-            foreach (var c in Consumers)
-            {
-                double util = (c.GetCurrentWorkloadRate() / c.MaxCapacity) * 100.0;
-                MetricsExporter.SetConsumerMetrics(c.Id, util, c.AssignedPartitions.Count);
-            }
+            Console.WriteLine($"[Assignment] Heterogeneous Assignment Complete. Consumers: {consumers.Count}. Total Cost: ${ConsumerGroup.TotalCostPerSecond:F2}/s");
         }
 
-        public void Autoscale()
+        public Task AutoScale()
         {
-            _assignmentStrategy.AutoScale();
+            if (ConsumerGroup == null) return Task.CompletedTask;
+
+            var consumers = ConsumerGroup.Consumers;
+            var partitions = ConsumerGroup.AllPartitions;
+
+            // --- HETEROGENEOUS SCALE DOWN LOGIC ---
+
+            // We want to find a consumer that we can delete. 
+            // Criteria:
+            // 1. Its partitions MUST fit into the remaining consumers.
+            // 2. We want to delete the one with the Worst "Value" (High Cost, Low Utilization).
+
+            var candidatesForRemoval = consumers
+                .Select(c => new
+                {
+                    Consumer = c,
+                    // Metric: Cost per unit of work currently being done. Higher is worse (more wasteful).
+                    // If utilization is 0, score is infinite (remove immediately).
+                    InefficiencyScore = c.GetCurrentWorkloadRate() == 0 ? double.MaxValue : c.ConsumerProfile.CostPerSecond / c.GetCurrentWorkloadRate()
+                })
+                .OrderByDescending(x => x.InefficiencyScore) // Look at most inefficient first
+                .ToList();
+
+            foreach (var item in candidatesForRemoval)
+            {
+                var candidate = item.Consumer;
+                double loadToRelocate = candidate.GetCurrentWorkloadRate();
+
+                // Calculate total Slack (free space) in the rest of the fleet
+                double totalSlackInOthers = consumers
+                    .Where(c => c.Id != candidate.Id)
+                    .Sum(c => c.RemainingCapacity);
+
+                // Simple check: Is there enough math space globally?
+                // (Constraint: We ideally want to check if individual partitions fit, 
+                // but global slack is a good enough proxy for a simulation heuristic).
+                if (totalSlackInOthers > loadToRelocate * 1.1) // 10% buffer
+                {
+                    Console.WriteLine($"[AUTOSCALE] Efficiency Check: Removing {candidate.Id} ({candidate.ConsumerProfile.Name}). Saving ${candidate.ConsumerProfile.CostPerSecond}/s");
+                    ConsumerGroup.RemoveConsumer(candidate);
+                    ConsumerGroup.Rebalance();
+                    return Task.CompletedTask; // Only remove one per interval to be safe
+                }
+            }
+
+            // --- SCALE UP IS HANDLED BY ASSIGNMENT ---
+            // In MWF, if load exists that doesn't fit, 'Assign' creates consumers. 
+            // However, we can do a proactive check here if we want to ensure headroom.
+
+            return Task.CompletedTask;
+        }
+    }
+
+    //not working as intended yet
+    public class ConsolidatingCostCentricModifiedWorstFitAssignment : IPartitionAssignmentStrategy
+    {
+        public double RebalanceTimeSeconds { get; set; }
+        public ConsumerGroup? ConsumerGroup { get; set; }
+
+        private const double ScaleDownUtilizationThreshold = 0.20; // Cost-aware threshold
+
+        private const double CapacityExcessFactor = 1;// 5.0 / 6.0; //  C = 5/6 * C
+
+        private ConsumerProfile GetOptimalProfile(double requiredCapacity)
+        {
+            if (ConsumerGroup == null) return ConsumerProfiles.Medium;
+
+            // 1. Filter profiles that are large enough to hold the load (with safety margin)
+            var candidates = ConsumerGroup.ConsumerProfiles
+                .Where(p => p.MaxCapacity * CapacityExcessFactor >= requiredCapacity)
+                .OrderBy(p => p.CostPerSecond) // Cheapest first
+                .ToList();
+
+            // 2. If valid candidates exist, pick the cheapest.
+            if (candidates.Any())
+            {
+                return candidates.First();
+            }
+
+            // 3. If NONE fit (load is huge), pick the largest available profile 
+            // (we will likely need multiple, but start with largest).
+            return ConsumerGroup.ConsumerProfiles.OrderByDescending(p => p.MaxCapacity).First();
+        }
+
+        public void Assign(List<Partition> partitions, List<Consumer> consumers)
+        {
+            if (ConsumerGroup == null || !consumers.Any()) return;
+
+            // Clear current mappings
+            foreach (var c in consumers) c.AssignedPartitions.Clear();
+
+            var unassignedPartitions = new List<Partition>();
+
+            // Sort consumers by total lag (heuristic to process heavy consumers first)
+            var sortedConsumers = consumers
+                .OrderByDescending(c => c.GetCurrentTotalLag(RebalanceTimeSeconds))
+                .ToList();
+
+            // --- PHASE 1: Preserve existing assignments where possible ---
+            foreach (var currentConsumer in sortedConsumers)
+            {
+                // Get partitions previously assigned to this specific consumer ID
+                var pset = partitions
+                    .Where(p => p.AssignedConsumer?.Id == currentConsumer.Id)
+                    .OrderBy(p => p.GetTotalLag(RebalanceTimeSeconds)) // Smallest first
+                    .ToList();
+
+                var keptPartitions = new List<Partition>();
+                var ejectedPartitions = new List<Partition>();
+
+                double currentLoad = 0;
+
+                // Greedy packing: Keep as many as fit
+                foreach (var p in pset)
+                {
+                    if (currentLoad + p.ProductionRate <= currentConsumer.MaxCapacity * CapacityExcessFactor)
+                    {
+                        currentConsumer.AssignedPartitions.Add(p);
+                        p.AssignedConsumer = currentConsumer;
+                        currentLoad += p.ProductionRate;
+                        keptPartitions.Add(p);
+                    }
+                    else
+                    {
+                        ejectedPartitions.Add(p);
+                    }
+                }
+
+                // If partitions were ejected, we need a new home for them.
+                // In MWF, we often create a new consumer immediately for ejected sets to maintain locality.
+                if (ejectedPartitions.Any())
+                {
+                    // HETEROGENEOUS LOGIC: 
+                    // Calculate exactly how much capacity we need for the ejected items
+                    double requiredCap = ejectedPartitions.Sum(p => p.ProductionRate);
+
+                    // Pick the best profile (Small/Medium/Large) for this specific overflow
+                    var bestProfile = GetOptimalProfile(requiredCap);
+
+                    var newConsumer = ConsumerGroup.AddConsumer(bestProfile.Name);
+
+                    // Assign ejected partitions to the new consumer
+                    foreach (var ep in ejectedPartitions)
+                    {
+                        // Note: If the new consumer is still too small (Corner case), 
+                        // they go to unassigned.
+                        if (newConsumer.GetCurrentWorkloadRate() + ep.ProductionRate <= newConsumer.MaxCapacity)
+                        {
+                            newConsumer.AssignedPartitions.Add(ep);
+                            ep.AssignedConsumer = newConsumer;
+                        }
+                        else
+                        {
+                            unassignedPartitions.Add(ep);
+                        }
+                    }
+                }
+            }
+
+            // --- PHASE 2: Handle Completely Unassigned / Orphaned Partitions ---
+            var newlyUnassigned = partitions.Where(p => p.AssignedConsumer == null).ToList();
+            var finalU = unassignedPartitions.Union(newlyUnassigned)
+                                             .OrderByDescending(p => p.GetTotalLag(RebalanceTimeSeconds))
+                                             .ToList();
+
+            foreach (var partition in finalU)
+            {
+                // Try to fit into ANY existing consumer (Modified Best Fit)
+                // We prioritize consumers that have space, sorting by "Cost Efficiency" implies 
+                // filling the expensive ones first to get our money's worth.
+                var candidate = consumers
+                    .Where(c => c.RemainingCapacity >= partition.ProductionRate)
+                    .OrderBy(c => c.RemainingCapacity) // Worst Fit (leaves large gaps for others) or Best Fit?
+                    .FirstOrDefault();
+
+                if (candidate != null)
+                {
+                    candidate.AssignedPartitions.Add(partition);
+                    partition.AssignedConsumer = candidate;
+                }
+                else
+                {
+                    // No one has space. Spin up a new Consumer just for this partition 
+                    // (and potentially subsequent ones).
+                    // We look ahead slightly? No, keeping it simple: match this partition size.
+                    var bestProfile = GetOptimalProfile(partition.ProductionRate);
+                    var newConsumer = ConsumerGroup.AddConsumer(bestProfile.Name);
+
+                    newConsumer.AssignedPartitions.Add(partition);
+                    partition.AssignedConsumer = newConsumer;
+
+                    // Update our local list so subsequent iterations see this new consumer
+                    consumers = ConsumerGroup.Consumers;
+                }
+            }
+
+            Console.WriteLine($"[Assignment] Heterogeneous Assignment Complete. Consumers: {consumers.Count}. Total Cost: ${ConsumerGroup.TotalCostPerSecond:F2}/s");
+        }
+
+        public Task AutoScale()
+        {
+            if (ConsumerGroup == null) return Task.CompletedTask;
+
+            // 1. Try Standard Scale Down (Remove empty/inefficient nodes into existing slack)
+            bool scaledDown = TryStandardScaleDown();
+            if (scaledDown) return Task.CompletedTask;
+
+            // 2. NEW: Try Consolidation (Merge multiple small nodes into one optimized node)
+            // Only run this if we didn't just scale down (to avoid too much churn at once)
+            TryConsolidateConsumers();
+
+            return Task.CompletedTask;
+        }
+
+        private bool TryStandardScaleDown()
+        {
+            var consumers = ConsumerGroup.Consumers;
+
+            // Find the most inefficient consumer (Cost / Load)
+            var candidates = consumers
+                .OrderByDescending(c => c.GetCurrentWorkloadRate() == 0 ? double.MaxValue : c.ConsumerProfile.CostPerSecond / c.GetCurrentWorkloadRate())
+                .ToList();
+
+            double totalGlobalSlack = consumers.Sum(c => c.RemainingCapacity);
+
+            foreach (var candidate in candidates)
+            {
+                double load = candidate.GetCurrentWorkloadRate();
+                double slackWithoutCandidate = totalGlobalSlack - candidate.RemainingCapacity;
+
+                // If the rest of the fleet can absorb this load
+                if (slackWithoutCandidate > load * 1.1)
+                {
+                    Console.WriteLine($"[AUTOSCALE] Standard Scale Down: Removing {candidate.Id}");
+                    ConsumerGroup.RemoveConsumer(candidate);
+                    ConsumerGroup.Rebalance();
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Looks for opportunities to replace multiple small consumers with one larger, cheaper consumer.
+        /// </summary>
+        private void TryConsolidateConsumers()
+        {
+            var consumers = ConsumerGroup.Consumers;
+            if (consumers.Count < 2) return;
+
+            // Sort by load (ascending) to try merging smallest consumers first
+            var sortedConsumers = consumers.OrderBy(c => c.GetCurrentWorkloadRate()).ToList();
+
+            // Simple Heuristic: Sliding Window of 2 consumers
+            // (You can expand this to window size 3 or 4 if needed)
+            for (int i = 0; i < sortedConsumers.Count - 1; i++)
+            {
+                var c1 = sortedConsumers[i];
+                var c2 = sortedConsumers[i + 1];
+
+                // 1. Calculate Combined State
+                double combinedLoad = c1.GetCurrentWorkloadRate() + c2.GetCurrentWorkloadRate();
+                double combinedCost = c1.ConsumerProfile.CostPerSecond + c2.ConsumerProfile.CostPerSecond;
+
+                // 2. Find the optimal single profile for this combined load
+                // (We reuse the helper from the previous step)
+                var bestProfile = GetOptimalProfile(combinedLoad);
+
+                // 3. The "Upgrade" Condition:
+                // Is the new single profile CHEAPER than the two existing ones?
+                // AND does it actually fit the load?
+                bool isCheaper = bestProfile.CostPerSecond < combinedCost;
+                bool fits = bestProfile.MaxCapacity >= combinedLoad * 1.05; // 5% safety buffer
+
+                if (isCheaper && fits)
+                {
+                    Console.WriteLine($"[AUTOSCALE] CONSOLIDATION FOUND!");
+                    Console.WriteLine($"   Merging {c1.ConsumerProfile.Name} (${c1.ConsumerProfile.CostPerSecond}) + {c2.ConsumerProfile.Name} (${c2.ConsumerProfile.CostPerSecond})");
+                    Console.WriteLine($"   Into -> {bestProfile.Name} (${bestProfile.CostPerSecond})");
+                    Console.WriteLine($"   Saving: ${combinedCost - bestProfile.CostPerSecond:F2}/sec");
+
+                    // Execute the swap
+                    // 1. Add the new efficient consumer
+                    var newConsumer = ConsumerGroup.AddConsumer(bestProfile.Name);
+
+                    // 2. Remove the old ones (Rebalance will move partitions to the new guy automatically)
+                    ConsumerGroup.RemoveConsumer(c1);
+                    ConsumerGroup.RemoveConsumer(c2);
+
+                    ConsumerGroup.Rebalance();
+                    return; // Only one merge per interval to maintain stability
+                }
+            }
         }
     }
 
     public class BrokerSimulator
     {
         private const double TimeStepSeconds = 1.0;
-        private const double ConsumerBaseCapacity = 1000.0; // bytes/sec per consumer
 
         public static async Task Main()
         {
             Console.WriteLine("Starting Kafka Autoscaling Simulation (Config-Driven)...");
 
-            IPartitionAssignmentStrategy assignmentStrategy = new ModifiedWorstFitAssignment();
+            IPartitionAssignmentStrategy assignmentStrategy = new CostCentricModifiedWorstFitAssignment();
 
             // Start metrics endpoint with strategy/run labels (from environment)
             var strategyEnv = assignmentStrategy.GetType().Name ?? System.Environment.GetEnvironmentVariable("STRATEGY");
@@ -1042,7 +890,7 @@ namespace MBrokerBench
             foreach (var p in partitions)
                 baseProductionRates[p.Id] = p.ProductionRate;
 
-            var group = new ConsumerGroup("MyGroup", partitions, ConsumerBaseCapacity, assignmentStrategy);
+            var group = new ConsumerGroup("MyGroup", partitions, ConsumerProfiles.AllProfiles, ConsumerProfiles.Medium, assignmentStrategy);
 
             // Start with 1 consumer
             group.AddConsumer();
@@ -1147,7 +995,7 @@ namespace MBrokerBench
                 double maxLagTime = group.AllPartitions
                     .Where(p => p.CurrentLag > 0 && p.AssignedConsumer != null)
                     .DefaultIfEmpty()
-                    .Max(p => p == null ? 0 : p.CurrentLag / (p.AssignedConsumer?.MaxCapacity ?? ConsumerBaseCapacity));
+                    .Max(p => p == null ? 0 : p.CurrentLag / (p.AssignedConsumer?.MaxCapacity ?? 1000));
 
                 var totalProductionRate = group.AllPartitions.Sum(p => p.ProductionRate);
                 var averageProductionRate = group.AllPartitions.Count > 0 ? totalProductionRate / group.AllPartitions.Count : 0.0;
@@ -1155,6 +1003,7 @@ namespace MBrokerBench
 
                 Console.WriteLine($"Total System Lag: {totalLag} messages. Total Production Rate: {totalProductionRate:F1} msgs/s. Average Production Rate: {averageProductionRate:F1} msgs/s");
                 Console.WriteLine($"Max Estimated Latency (Worst-Case): {maxLagTime:F2} seconds (Target: {group.LatencySLASeconds}s)");
+                Console.WriteLine($"Total System Cost: {group.TotalCostPerSecond}");
 
                 // Update metrics
                 MetricsExporter.SetTotalLag(totalLag);
@@ -1179,7 +1028,7 @@ namespace MBrokerBench
 
                     double consumerLag = consumer.GetCurrentTotalLag(0);
 
-                    Console.WriteLine($"  {consumer.Id}: Messages={consumerLag:F0} msg Rate={consumer.GetCurrentWorkloadRate():F0} msgs/s. Util={utilization:F1}%. Partitions: {string.Join(", ", consumer.AssignedPartitions.Select(p => p.Id))}");
+                    Console.WriteLine($"  {consumer.Id}: Profile={consumer.ConsumerProfile.ShortCode} Messages={consumerLag:F0} msg Rate={consumer.GetCurrentWorkloadRate():F0} msgs/s. Util={utilization:F1}%. Partitions: {string.Join(", ", consumer.AssignedPartitions.Select(p => p.Id))}");
                 }
 
                 Thread.Sleep(200);
