@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mbrokerbench
+  labels:
+    app: mbrokerbench
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mbrokerbench
+  template:
+    metadata:
+      labels:
+        app: mbrokerbench
+    spec:
+      containers:
+        - name: mbrokerbench
+          image: "<REGISTRY>/mbrokerbench:latest" # replace with your image
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 1234
+              name: metrics
+          env:
+            - name: STRATEGY
+              value: "ModifiedWorstFitAssignment"
+            - name: RUN_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "kafka:9092" # set to your Kafka bootstrap servers
+            - name: KAFKA_TOPIC
+              value: "my-topic"
+          volumeMounts:
+            - name: sim-config
+              mountPath: /app/simulation_config.json
+              subPath: simulation_config.json
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 20
+      volumes:
+        - name: sim-config
+          configMap:
+            name: mbroker-sim-config
+            items:
+              - key: simulation_config.json
+                path: simulation_config.json
