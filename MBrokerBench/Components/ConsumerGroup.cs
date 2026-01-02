@@ -21,7 +21,7 @@ namespace MBrokerBench.Components
 
         public double RebalanceTimeSeconds { get; } = 5; // rebalance blocking time
 
-        public double LatencySLASeconds { get; } = 80;   // SLA window
+        public double LatencySLASeconds { get; } = 10;   // SLA window
 
        
 

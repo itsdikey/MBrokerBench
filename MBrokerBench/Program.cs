@@ -1,13 +1,32 @@
-﻿using MBrokerBench.Models;
+﻿using ConsolePlot;
+using ConsolePlot.Drawing.Tools;
+using MBrokerBench.Components;
+using MBrokerBench.DataProviders;
+using MBrokerBench.Models;
+using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
-using System.Text;
-using System.IO;
-using MBrokerBench.Components;
 
 namespace MBrokerBench
 {
-    
+    // Centralized logger to enable/disable console output from one place.
+    public static class Logger
+    {
+        // Set to false to silence all Logger.Log calls.
+        public static bool Enabled { get; set; } = true;
+
+        public static void Log(string message)
+        {
+            if (Enabled) Console.WriteLine(message);
+        }
+
+        public static void Log(string format, params object[] args)
+        {
+            if (Enabled) Console.WriteLine(format, args);
+        }
+    }
+
     public class ModifiedWorstFitAssignment : IPartitionAssignmentStrategy
     {
         public double RebalanceTimeSeconds { get; set; }
@@ -24,8 +43,10 @@ namespace MBrokerBench
                 return;
             }
 
-            if (!consumers.Any()) return;
-
+            if (consumers == null)
+            {
+                return;
+            }
 
             foreach (var c in consumers)
             {
@@ -167,7 +188,7 @@ namespace MBrokerBench
                 partition.AssignedConsumer = targetConsumer;
             } // Line 30: end for
 
-            Console.WriteLine($"[Assignment] Used ModifiedWorstFit (MWF) strategy (Paper-exact logic). Consumers={consumers.Count}. Partitions to reassign: {sortedFinalU.Count}");
+            Logger.Log($"[Assignment] Used ModifiedWorstFit (MWF) strategy (Paper-exact logic). Consumers={consumers.Count}. Partitions to reassign: {sortedFinalU.Count}");
         }
 
         public Task AutoScale()
@@ -189,7 +210,7 @@ namespace MBrokerBench
 
                     if (removable != null)
                     {
-                        Console.WriteLine($"[AUTOSCALE] Scaling DOWN by 1 consumer ({removable.Id}).");
+                        Logger.Log($"[AUTOSCALE] Scaling DOWN by 1 consumer ({removable.Id}).");
                         ConsumerGroup.RemoveConsumer(removable);
                         ConsumerGroup.Rebalance();
                     }
@@ -225,7 +246,7 @@ namespace MBrokerBench
             if (targetConsumers > consumers.Count)
             {
                 int toAdd = targetConsumers - consumers.Count;
-                Console.WriteLine($"[AUTOSCALE] Scaling UP by {toAdd} consumers. Required={requiredConsumers}.");
+                Logger.Log($"[AUTOSCALE] Scaling UP by {toAdd} consumers. Required={requiredConsumers}.");
                 for (int i = 0; i < toAdd; i++) ConsumerGroup.AddConsumer();
                 ConsumerGroup.Rebalance();
             }
@@ -239,7 +260,7 @@ namespace MBrokerBench
 
                 if (removable != null)
                 {
-                    Console.WriteLine($"[AUTOSCALE] Scaling DOWN by 1 consumer ({removable.Id}). Required={requiredConsumers}.");
+                    Logger.Log($"[AUTOSCALE] Scaling DOWN by 1 consumer ({removable.Id}). Required={requiredConsumers}.");
                     ConsumerGroup.RemoveConsumer(removable);
                     ConsumerGroup.Rebalance();
                 }
@@ -282,7 +303,7 @@ namespace MBrokerBench
 
         public void Assign(List<Partition> partitions, List<Consumer> consumers)
         {
-            if (ConsumerGroup == null || !consumers.Any()) return;
+            if (ConsumerGroup == null || consumers==null) return;
 
             // Clear current mappings
             foreach (var c in consumers) c.AssignedPartitions.Clear();
@@ -399,7 +420,7 @@ namespace MBrokerBench
                 ConsumerGroup.RemoveConsumer(consumer);
             }
 
-            Console.WriteLine($"[Assignment] Heterogeneous Assignment Complete. Consumers: {consumers.Count}. Total Cost: ${ConsumerGroup.TotalCostPerSecond:F2}/s");
+            Logger.Log($"[Assignment] Heterogeneous Assignment Complete. Consumers: {consumers.Count}. Total Cost: ${ConsumerGroup.TotalCostPerSecond:F2}/s");
         }
 
         private double _previousTotalLag = double.MaxValue;
@@ -415,7 +436,7 @@ namespace MBrokerBench
 
             if (totalLag > _previousTotalLag * 1.05)
             {
-                Console.WriteLine("[AUTOSCALE] Scaling down ABORTED: System lag is increasing.");
+                Logger.Log("[AUTOSCALE] Scaling down ABORTED: System lag is increasing.");
                 _previousTotalLag = totalLag;
                 return Task.CompletedTask;
             }
@@ -433,7 +454,7 @@ namespace MBrokerBench
                     Consumer = c,
                     // Metric: Cost per unit of work currently being done. Higher is worse (more wasteful).
                     // If utilization is 0, score is infinite (remove immediately).
-                    InefficiencyScore = c.GetCurrentAndFutureWorkloadRate(SLA) == 0 ? double.MaxValue : c.ConsumerProfile.CostPerSecond / c.GetCurrentAndFutureWorkloadRate(SLA)
+                    InefficiencyScore = c.GetCurrentWorkloadRate() == 0 ? double.MaxValue : c.ConsumerProfile.CostPerSecond / c.GetCurrentWorkloadRate()
                 })
                 .OrderByDescending(x => x.InefficiencyScore) // Look at most inefficient first
                 .ToList();
@@ -450,9 +471,10 @@ namespace MBrokerBench
 
                 if (CanRelocateLoad(loadToMove, survivors))
                 {
-                    Console.WriteLine($"[AUTOSCALE] Efficiency Check: Removing {candidate.Id}. " +
+                    Logger.Log($"[AUTOSCALE] Efficiency Check: Removing {candidate.Id}. " +
                                       $"SLA Guaranteed via Bin Packing simulation.");
 
+                    removals.Add(candidate);
                     ConsumerGroup.RemoveConsumer(candidate);
                     ConsumerGroup.Rebalance();
                     return Task.CompletedTask; // Remove only one at a time for stability
@@ -470,12 +492,10 @@ namespace MBrokerBench
                 // Simple check: Is there enough math space in any partition
                 if (maxSlackLeft * CapacityExcessFactor > loadToRelocate) // 10% buffer
                 {
-                    Console.WriteLine($"[AUTOSCALE] Efficiency Check: Removing {candidate.Id} ({candidate.ConsumerProfile.Name}). Saving ${candidate.ConsumerProfile.CostPerSecond}/s");
+                    Logger.Log($"[AUTOSCALE] Efficiency Check: Removing {candidate.Id} ({candidate.ConsumerProfile.Name}). Saving ${candidate.ConsumerProfile.CostPerSecond}/s");
                     removals.Add(candidate);
                 }
             }
-
-            Console.ReadLine();
 
             foreach (var candidate in removals)
             {
@@ -706,10 +726,10 @@ namespace MBrokerBench
 
                         if ((savingsPerSec * payoffTime) > penalty)
                         {
-                            Console.WriteLine($"[AUTOSCALE] MERGE DETECTED (Financial Sense):");
-                            Console.WriteLine($"   {c1.Id} ({c1.ConsumerProfile.Name}) + {c2.Id} ({c2.ConsumerProfile.Name}) -> {bestProfile.Name}");
-                            Console.WriteLine($"   Load: {combinedLoad:F1}. Old Cost: ${currentCost:F2} -> New Cost: ${newCost:F2}");
-                            Console.WriteLine($"   Savings: ${savingsPerSec:F2}/s. Penalty: ${penalty:F2} (Moves: {partitionsMoving})");
+                            Logger.Log("[AUTOSCALE] MERGE DETECTED (Financial Sense):");
+                            Logger.Log($"   {c1.Id} ({c1.ConsumerProfile.Name}) + {c2.Id} ({c2.ConsumerProfile.Name}) -> {bestProfile.Name}");
+                            Logger.Log($"   Load: {combinedLoad:F1}. Old Cost: ${currentCost:F2} -> New Cost: ${newCost:F2}");
+                            Logger.Log($"   Savings: ${savingsPerSec:F2}/s. Penalty: ${penalty:F2} (Moves: {partitionsMoving})");
 
                             // Execute Merge
                             var newConsumer = ConsumerGroup.AddConsumer(bestProfile.Name);
@@ -736,7 +756,7 @@ namespace MBrokerBench
 
             if (totalLag > _previousTotalLag * 1.05)
             {
-                Console.WriteLine("[AUTOSCALE] Scaling down ABORTED: System lag is increasing.");
+                Logger.Log("[AUTOSCALE] Scaling down ABORTED: System lag is increasing.");
                 _previousTotalLag = totalLag;
                 return false;
             }
@@ -774,7 +794,7 @@ namespace MBrokerBench
                 // but global slack is a good enough proxy for a simulation heuristic).
                 if (maxSlackLeft > loadToRelocate * 1.1) // 10% buffer
                 {
-                    Console.WriteLine($"[AUTOSCALE] Efficiency Check: Removing {candidate.Id} ({candidate.ConsumerProfile.Name}). Saving ${candidate.ConsumerProfile.CostPerSecond}/s");
+                    Logger.Log($"[AUTOSCALE] Efficiency Check: Removing {candidate.Id} ({candidate.ConsumerProfile.Name}). Saving ${candidate.ConsumerProfile.CostPerSecond}/s");
                     ConsumerGroup.RemoveConsumer(candidate);
                     ConsumerGroup.Rebalance();
                     return true; // Only remove one per interval to be safe
@@ -807,9 +827,17 @@ namespace MBrokerBench
     {
         private const double TimeStepSeconds = 0.1;
 
+        public enum DebugMode
+        {
+            Console,
+            Plot
+        }
+
+        public const DebugMode Mode = DebugMode.Console;
+
         public static async Task Main()
         {
-            Console.WriteLine("Starting Kafka Autoscaling Simulation (Config-Driven)...");
+            Logger.Log("Starting Kafka Autoscaling Simulation (Config-Driven)...");
 
             IPartitionAssignmentStrategy assignmentStrategy = new CostCentricModifiedWorstFitAssignment();
 
@@ -820,15 +848,17 @@ namespace MBrokerBench
 
             // Use JSON config data provider to initialize partitions and handle rate/events
             var configPath = Path.Combine(AppContext.BaseDirectory, "simulation_config.json");
-            var provider = new DataProviders.JSONConfigDataProvider(configPath);
+            //var provider = new JSONConfigDataProvider(configPath);
+            //var provider = new PoissonDataProvider(PoissonDataProvider.ScenarioSkewed9);
+            var provider = new SinusoidDataProvider(SinusoidDataProvider.ScenarioSkewed9);
             var partitions = provider.InitializePartitions();
             int maxRuntime = provider.MaxRuntimeSteps > 0 ? provider.MaxRuntimeSteps : 600;
 
             // Initialize consumer group
-            var group = new ConsumerGroup("MyGroup", partitions, ConsumerProfiles.AllProfiles, ConsumerProfiles.Large, assignmentStrategy);
+            var group = new ConsumerGroup("MyGroup", partitions, ConsumerProfiles.AllProfiles, ConsumerProfiles.Small, assignmentStrategy);
 
             // Start with 1 consumer
-            group.AddConsumer();
+            // group.AddConsumer();
             group.Rebalance();
 
             // Prepare CSV export for timestep series
@@ -843,9 +873,46 @@ namespace MBrokerBench
 
             double lastLagTime = -1;
 
+            #region Plot Init
+            List<int> steps = new List<int>();
+            List<double> productionRate = new List<double>();
+            // create plot sized to your console
+            var plt = new Plot(120, 30);
+            #endregion
+
+            Logger.Enabled = Mode == DebugMode.Console;
+
             for (int step = 1; step <= maxRuntime; step++)
-             {
-                 Console.WriteLine($"\n--- SIMULATION STEP {step} ---");
+            {
+                if(Mode == DebugMode.Plot)
+                {
+                    Console.CursorLeft = 0;
+                    Console.CursorTop = 0;
+
+                    steps.Add(step);
+                    productionRate.Add(group.AllPartitions.Sum(p => p.ProductionRate));
+
+                    // prepare arrays
+                    var xs = steps.Select(i => (double)i).ToArray();
+                    var ys = productionRate.ToArray();
+
+
+                    // axis/grid settings (optional)
+                    plt.Axis.IsVisible = true;
+                    plt.Grid.IsVisible = true;
+                    plt.Ticks.IsVisible = true;
+
+                    // add the series (line)
+                    plt.AddSeries(xs, ys, new PointPen(SystemPointBrushes.Dot, ConsoleColor.Green));
+
+                    // draw & render
+                    Console.OutputEncoding = System.Text.Encoding.UTF8;
+                    plt.Draw();
+                    plt.Render();
+                }
+            
+
+                Logger.Log($"\n--- SIMULATION STEP {step} ---");
                 // Let provider process rate changes / events for this timestep
                  provider.Process(group.AllPartitions, step);
                  // Production
@@ -865,7 +932,8 @@ namespace MBrokerBench
                 }
 
                 // Reporting
-                Console.WriteLine($"Current Consumers: {group.Consumers.Count}");
+                Logger.Log($"Current Consumers: {group.Consumers.Count}");
+                Logger.Log($"Current Partitions: {group.AllPartitions.Count}");
                 long totalLag = group.AllPartitions.Sum(p => p.CurrentLag);
 
                 double maxLagTime = group.AllPartitions
@@ -876,10 +944,11 @@ namespace MBrokerBench
                 var totalProductionRate = group.AllPartitions.Sum(p => p.ProductionRate);
                 var averageProductionRate = group.AllPartitions.Count > 0 ? totalProductionRate / group.AllPartitions.Count : 0.0;
 
+                Logger.Log("ALGORITHM: " + assignmentStrategy.GetType().Name);
 
-                Console.WriteLine($"Total System Lag: {totalLag} messages. Total Production Rate: {totalProductionRate:F1} msgs/s. Average Production Rate: {averageProductionRate:F1} msgs/s");
-                Console.WriteLine($"Max Estimated Latency (Worst-Case): {maxLagTime:F2} seconds (Target: {group.LatencySLASeconds}s)");
-                Console.WriteLine($"Total System Cost: {group.TotalCostPerSecond}");
+                Logger.Log($"Total System Lag: {totalLag} messages. Total Production Rate: {totalProductionRate:F1} msgs/s. Average Production Rate: {averageProductionRate:F1} msgs/s");
+                Logger.Log($"Max Estimated Latency (Worst-Case): {maxLagTime:F2} seconds (Target: {group.LatencySLASeconds}s)");
+                Logger.Log($"Total System Cost: {group.TotalCostPerSecond}");
 
                 var counter = new Dictionary<string, int>();
                 foreach(var consumer in group.Consumers)
@@ -890,16 +959,17 @@ namespace MBrokerBench
                     counter[profileCode]++;
                 }
 
-                Console.WriteLine("Consumer Profiles:");
+                Logger.Log("Consumer Profiles:");
                 foreach(var kvp in counter)
                 {
-                    Console.WriteLine($"  {kvp.Key}: {kvp.Value}");
+                    Logger.Log($"  {kvp.Key}: {kvp.Value}");
                 }
 
 
                 // Update metrics
                 MetricsExporter.SetTotalLag(totalLag);
                 MetricsExporter.SetConsumers(group.Consumers.Count);
+
                 foreach (var p in group.AllPartitions)
                 {
                     MetricsExporter.SetPartition(p.Id, p.CurrentLag, p.ProductionRate);
@@ -954,11 +1024,11 @@ namespace MBrokerBench
                 if (lastLagTime != -1)
                 {
                     double lagChange = maxLagTime - lastLagTime;
-                    Console.WriteLine($"Lag Change This Step: {lagChange} messages ({(lagChange / TimeStepSeconds):F1} msgs/s)");
+                    Logger.Log($"Lag Change This Step: {lagChange} messages ({(lagChange / TimeStepSeconds):F1} msgs/s)");
 
                     if (lagChange > 8)
                     {
-                        Console.WriteLine($"[ALERT] System lag is INCREASING! (+{lagChange:F2} seconds this step)");
+                        Logger.Log($"[ALERT] System lag is INCREASING! (+{lagChange:F2} seconds this step)");
 
                         Console.ReadLine();
                     }
@@ -984,7 +1054,7 @@ namespace MBrokerBench
             // Allow metrics server to be stopped gracefully
             MetricsExporter.Stop().Wait();
 
-            Console.WriteLine("Simulation finished.");
+            Logger.Log("Simulation finished.");
         }
     }
 }

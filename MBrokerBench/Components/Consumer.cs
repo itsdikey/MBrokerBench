@@ -50,7 +50,7 @@ namespace MBrokerBench.Components
 
                 long consumed = Math.Min(partition.CurrentLag, (long)Math.Floor(availableWork));
 
-                partition.CurrentLag -= consumed;
+                partition.Consume(consumed);
                 totalConsumed += consumed;
                 availableWork -= consumed;
             }
