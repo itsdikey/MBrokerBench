@@ -37,8 +37,8 @@ namespace MBrokerBench.Models
     public static class ConsumerProfiles
     {
         public static readonly ConsumerProfile Small = new ConsumerProfile("Small", 500, 0.5); // cost per 100 bytes = 0.1
-        public static readonly ConsumerProfile Medium = new ConsumerProfile("Medium", 1000, 0.9); // this is to simulate better cost ratio, e.g., cost per 100 bytes = 0.090
-        public static readonly ConsumerProfile Large = new ConsumerProfile("Large", 2500, 2.4); // large cost per 100 bytes = 0.096
+        public static readonly ConsumerProfile Medium = new ConsumerProfile("Medium", 1000, 1); // this is to simulate better cost ratio, e.g., cost per 100 bytes = 0.090
+        public static readonly ConsumerProfile Large = new ConsumerProfile("Large", 2500, 2.5); // large cost per 100 bytes = 0.096
 
         public static readonly List<ConsumerProfile> AllProfiles = new List<ConsumerProfile> { Small, Medium, Large };
     }

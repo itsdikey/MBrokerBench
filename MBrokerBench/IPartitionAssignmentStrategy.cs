@@ -1,4 +1,6 @@
-﻿namespace MBrokerBench
+﻿using MBrokerBench.Components;
+
+namespace MBrokerBench
 {
     // Assignment strategy interface.
     public interface IPartitionAssignmentStrategy

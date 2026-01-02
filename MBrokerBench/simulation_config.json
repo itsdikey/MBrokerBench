@@ -1,7 +1,43 @@
 {
-  "ActiveTest": "WorstFitTest1",
+  "ActiveTest": "WorstFitTest_HV",
 
   "Configs": [
+    {
+      "Name": "WorstFitTest_Low",
+      "InitialPartitionsConfig": {
+        "Count": 32,
+        "ProductionRateRange": {
+          "Min": 100,
+          "Max": 850
+        },
+        "RateVariability": 0.25,
+        "RateRefreshIntervalSteps": 12,
+        "InitialLagRange": {
+          "Min": 0,
+          "Max": 500
+        },
+        "MaxRate": 1000,
+        "MaxRuntimeSteps": 100000
+      }
+    },
+    {
+      "Name": "WorstFitTest_HV",
+      "InitialPartitionsConfig": {
+        "Count": 32,
+        "ProductionRateRange": {
+          "Min": 200,
+          "Max": 1500
+        },
+        "RateVariability": 0.5,
+        "RateRefreshIntervalSteps": 12,
+        "InitialLagRange": {
+          "Min": 0,
+          "Max": 500
+        },
+        "MaxRate": 2000,
+        "MaxRuntimeSteps": 100000
+      }
+    },
     {
       "Name": "WorstFitTest1",
       "InitialPartitionsConfig": {

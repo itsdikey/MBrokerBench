@@ -1,6 +1,6 @@
 ﻿using MBrokerBench.Models;
 
-namespace MBrokerBench
+namespace MBrokerBench.Components
 {
     public class ConsumerGroup
     {
@@ -15,14 +15,28 @@ namespace MBrokerBench
         public double ConsumerCapacity => _consumerCapacity;
 
         private readonly IPartitionAssignmentStrategy _assignmentStrategy;
-        
+
         private readonly double _consumerCapacity;
 
 
-        public double RebalanceTimeSeconds { get; } = 5.0; // rebalance blocking time
+        public double RebalanceTimeSeconds { get; } = 5; // rebalance blocking time
 
-        public double LatencySLASeconds { get; } = 10.0;   // SLA window
+        public double LatencySLASeconds { get; } = 80;   // SLA window
 
+       
+
+        // Statistics for CSV/export
+        private int _rebalanceSteps = 0;
+        private int _totalReassignments = 0;
+        private int _scaleUpOperations = 0;
+        private int _scaleDownOperations = 0;
+        private double _rScoreValue = 0.0;
+
+        public int RebalanceSteps => _rebalanceSteps;
+        public int TotalReassignments => _totalReassignments;
+        public int ScaleUpOperations => _scaleUpOperations;
+        public int ScaleDownOperations => _scaleDownOperations;
+        public double RScoreValue => _rScoreValue;
 
         public ConsumerGroup(
             string groupId,
@@ -49,9 +63,10 @@ namespace MBrokerBench
             var profile = ConsumerProfiles.FirstOrDefault(p => p.Name == profileName) ?? DefaultProfile;
             var newConsumer = new Consumer($"C-{Guid.NewGuid()}", profile);
             Consumers.Add(newConsumer);
+            _scaleUpOperations++;
             MetricsExporter.SetConsumers(Consumers.Count);
             MetricsExporter.IncScaleUp();
-            Console.WriteLine($"[SCALED UP] New Consumer {newConsumer.Id} added. Total: {Consumers.Count}");
+            Console.WriteLine($"[SCALED UP] New Consumer {newConsumer.Id} {newConsumer.ConsumerProfile.ShortCode} added. Total: {Consumers.Count}");
             return newConsumer;
         }
 
@@ -67,6 +82,7 @@ namespace MBrokerBench
             }
 
             Consumers.Remove(consumer);
+            _scaleDownOperations++;
             MetricsExporter.SetConsumers(Consumers.Count);
             MetricsExporter.IncScaleDown();
             Console.WriteLine($"[SCALED DOWN] Consumer {consumer.Id} removed. Total: {Consumers.Count}");
@@ -91,16 +107,33 @@ namespace MBrokerBench
 
             _assignmentStrategy.Assign(AllPartitions, Consumers);
 
+            // increment rebalance counter
+            _rebalanceSteps++;
+
+
+            List<ReassignedPartitionDetails> reassignedPartitionsDetails = new List<ReassignedPartitionDetails>();
+
             foreach(var partition in AllPartitions)
             {
                 if (partitionConsumerMap.TryGetValue(partition.Id, out var previousConsumerId))
                 {
                     if (previousConsumerId != partition.AssignedConsumer?.Id)
                     {
+                        // count reassignments
+                        _totalReassignments++;
+                        
+    
+                        if(partition.AssignedConsumer != null)
+                        {
+                            reassignedPartitionsDetails.Add(new ReassignedPartitionDetails(partition.AssignedConsumer.MaxCapacity, partition.ProductionRate));
+                        }
+
                         partition.Produce(RebalanceTimeSeconds);
                     }
                 }
             }
+
+            _rScoreValue = MathUtils.CalculateRScore(reassignedPartitionsDetails);
 
             // Update partition metrics labels after rebalance
             foreach (var p in AllPartitions)
@@ -112,14 +145,61 @@ namespace MBrokerBench
             // Update consumer metrics after rebalance
             foreach (var c in Consumers)
             {
-                double util = (c.GetCurrentWorkloadRate() / c.MaxCapacity) * 100.0;
+                double util = c.GetCurrentWorkloadRate() / c.MaxCapacity * 100.0;
                 MetricsExporter.SetConsumerMetrics(c.Id, util, c.AssignedPartitions.Count);
             }
         }
 
         public void Autoscale()
         {
+            var partitionConsumerMap = new Dictionary<string, string?>();
+
+            foreach (var consumer in Consumers)
+            {
+                foreach (var partition in consumer.AssignedPartitions)
+                {
+                    partitionConsumerMap[partition.Id] = consumer.Id;
+                }
+            }
+
             _assignmentStrategy.AutoScale();
+
+            List<ReassignedPartitionDetails> reassignedPartitionsDetails = new List<ReassignedPartitionDetails>();
+
+            foreach (var partition in AllPartitions)
+            {
+                if (partitionConsumerMap.TryGetValue(partition.Id, out var previousConsumerId))
+                {
+                    if (previousConsumerId != partition.AssignedConsumer?.Id)
+                    {
+                        // count reassignments
+                        _totalReassignments++;
+
+
+                        if (partition.AssignedConsumer != null)
+                        {
+                            reassignedPartitionsDetails.Add(new ReassignedPartitionDetails(partition.AssignedConsumer.MaxCapacity, partition.ProductionRate));
+                        }
+
+                        partition.Produce(RebalanceTimeSeconds);
+                    }
+                }
+            }
+            _rScoreValue = MathUtils.CalculateRScore(reassignedPartitionsDetails);
+
+            // Update partition metrics labels after rebalance
+            foreach (var p in AllPartitions)
+            {
+                MetricsExporter.SetPartition(p.Id, p.CurrentLag, p.ProductionRate);
+                MetricsExporter.SetPartitionAssignment(p.Id, p.AssignedConsumer?.Id);
+            }
+
+            // Update consumer metrics after rebalance
+            foreach (var c in Consumers)
+            {
+                double util = c.GetCurrentWorkloadRate() / c.MaxCapacity * 100.0;
+                MetricsExporter.SetConsumerMetrics(c.Id, util, c.AssignedPartitions.Count);
+            }
         }
     }
 }

@@ -1,8 +1,8 @@
-﻿namespace MBrokerBench
+﻿namespace MBrokerBench.Components
 {
     // Simulation runtime classes (models moved to MBrokerBench/Models/SimulationModels.cs)
 
-    public class Partition
+    public class Partition : IPartition
     {
         public string Id { get; }
         public long CurrentLag { get; set; } // Messages or bytes pending consumption
@@ -27,6 +27,13 @@
         public long GetTotalLag(double rebalanceTimeSeconds)
         {
             return CurrentLag + (long)Math.Ceiling(ProductionRate * rebalanceTimeSeconds);
+        }
+
+        public double GetRequiredThroughput(double sla)
+        {
+            double catchupRate = CurrentLag / sla;
+
+            return ProductionRate + catchupRate;
         }
     }
 }

@@ -1,4 +1,6 @@
-﻿namespace MBrokerBench
+﻿using MBrokerBench.Components;
+
+namespace MBrokerBench
 {
     public class PaperLeastLoadedBinPackStrategy : IPartitionAssignmentStrategy
     {
