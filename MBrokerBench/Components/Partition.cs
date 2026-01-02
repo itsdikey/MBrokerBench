@@ -35,5 +35,10 @@
 
             return ProductionRate + catchupRate;
         }
+
+        public void Consume(long amount)
+        {
+            CurrentLag -= amount;
+        }
     }
 }
