@@ -1,4 +1,6 @@
-﻿namespace MBrokerBench
+﻿using MBrokerBench.Components;
+
+namespace MBrokerBench
 {
     // Lag-aware worst-fit assignment (place largest total-lag partitions on least-lagged consumer).
     public class LagAwareWorstFitAssignment : IPartitionAssignmentStrategy
