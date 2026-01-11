@@ -850,7 +850,33 @@ namespace MBrokerBench
             var configPath = Path.Combine(AppContext.BaseDirectory, "simulation_config.json");
             //var provider = new JSONConfigDataProvider(configPath);
             //var provider = new PoissonDataProvider(PoissonDataProvider.ScenarioSkewed9);
-            var provider = new SinusoidDataProvider(SinusoidDataProvider.ScenarioSkewed9);
+            //var provider = new SinusoidDataProvider(SinusoidDataProvider.ScenarioSkewed9);
+
+            // Optional: Replay or Save simulation. Use environment variables:
+            // REPLAY_SIM_PATH -> path to recorded simulation to replay
+            // SAVE_SIM_PATH   -> path to save recorded simulation (wraps the selected provider)
+            string replayPath = System.Environment.GetEnvironmentVariable("REPLAY_SIM_PATH");
+            string savePath = System.Environment.GetEnvironmentVariable("SAVE_SIM_PATH");
+
+            dynamic provider;
+
+            if (!string.IsNullOrEmpty(replayPath))
+            {
+                provider = new ReplayDataProvider(replayPath);
+            }
+            else
+            {
+                var baseProvider = new NYTaxiDataProvider(SinusoidDataProvider.ScenarioSkewed9);
+                if (!string.IsNullOrEmpty(savePath))
+                {
+                    provider = new SimulationRecorder(savePath, baseProvider);
+                }
+                else
+                {
+                    provider = baseProvider;
+                }
+            }
+
             var partitions = provider.InitializePartitions();
             int maxRuntime = provider.MaxRuntimeSteps > 0 ? provider.MaxRuntimeSteps : 600;
 
@@ -1042,6 +1068,21 @@ namespace MBrokerBench
             // close csv writer by disposing via using
             csvWriter.Close();
             csvWriter.Dispose();
+
+            // If we recorded the simulation, save it now
+            if (provider is SimulationRecorder recorder)
+            {
+                try
+                {
+                    recorder.Save();
+                    Logger.Log($"Recorded simulation saved to: {recorder.Path}");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"Failed to save recorded simulation: {ex.Message}");
+                }
+            }
+
             await MetricsExporter.Finalizer();
 
             Console.ReadLine();
