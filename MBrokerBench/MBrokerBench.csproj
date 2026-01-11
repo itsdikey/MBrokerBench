@@ -32,4 +32,8 @@
     <Folder Include="export_csv\" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\MSodaClient\MSodaClient.csproj" />
+  </ItemGroup>
+
 </Project>

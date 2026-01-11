@@ -162,6 +162,9 @@ namespace MBrokerBench.Components
                 }
             }
 
+
+            Rebalance();
+
             _assignmentStrategy.AutoScale();
 
             List<ReassignedPartitionDetails> reassignedPartitionsDetails = new List<ReassignedPartitionDetails>();
