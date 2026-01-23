@@ -8,6 +8,10 @@ namespace MBrokerBench.Components
         public List<Partition> AllPartitions { get; }
         public List<Consumer> Consumers { get; private set; } = new List<Consumer>();
 
+        public List<Consumer> ActiveConsumers => Consumers.Where(c => c.State == ConsumerState.Running).ToList();
+        public List<Consumer> BootingConsumers => Consumers.Where(c => c.State == ConsumerState.Booting).ToList();
+
+
         public double TotalCostPerSecond => Consumers.Sum(x => x.ConsumerProfile.CostPerSecond);
 
         public IReadOnlyList<ConsumerProfile> ConsumerProfiles { get; private set; }
@@ -105,7 +109,7 @@ namespace MBrokerBench.Components
                 }
             }
 
-            _assignmentStrategy.Assign(AllPartitions, Consumers);
+            _assignmentStrategy.Assign(AllPartitions, Consumers); // ActiveConsumers
 
             // increment rebalance counter
             _rebalanceSteps++;
@@ -184,7 +188,9 @@ namespace MBrokerBench.Components
                             reassignedPartitionsDetails.Add(new ReassignedPartitionDetails(partition.AssignedConsumer.MaxCapacity, partition.ProductionRate));
                         }
 
-                        partition.Produce(RebalanceTimeSeconds);
+                        //partition.Produce(RebalanceTimeSeconds);
+                        //moving to pause logic instead
+                        partition.RebalancePenaltyRemaining = RebalanceTimeSeconds;
                     }
                 }
             }
@@ -203,6 +209,51 @@ namespace MBrokerBench.Components
                 double util = c.GetCurrentWorkloadRate() / c.MaxCapacity * 100.0;
                 MetricsExporter.SetConsumerMetrics(c.Id, util, c.AssignedPartitions.Count);
             }
+        }
+
+        private double _lastRebalanceTime;
+        private double _totalTime = 0;
+
+        internal long Tick(double timeStepSeconds)
+        {
+            _totalTime += timeStepSeconds;
+
+            // Production
+            AllPartitions.ForEach(p => p.Produce(timeStepSeconds));
+
+            // Consumption
+            long stepConsumed = 0;
+            bool consumerCameOnline = false;
+            foreach (var c in Consumers)
+            {
+                var oldState = c.State;
+                c.Tick(timeStepSeconds);
+
+                if (oldState == ConsumerState.Booting && c.State == ConsumerState.Running)
+                {
+                    consumerCameOnline = true;
+                    Console.WriteLine($"[LIFECYCLE] Consumer {c.Id} is now ONLINE (Warmup: {c.Efficiency * 100:F0}%).");
+                }
+            }
+
+            if (consumerCameOnline)
+            {
+                Autoscale();
+            }
+
+            foreach (var c in Consumers)
+            {
+                stepConsumed += c.Consume(timeStepSeconds);
+            }
+
+            // Autoscale check every 30 seconds
+            if (_totalTime - _lastRebalanceTime > 30)
+            {
+                Autoscale();
+                _lastRebalanceTime = _totalTime;
+            }
+
+            return stepConsumed;
         }
     }
 }
