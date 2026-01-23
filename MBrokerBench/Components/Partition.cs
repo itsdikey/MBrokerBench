@@ -10,6 +10,7 @@
 
         // Consumer currently assigned to this partition.
         public Consumer? AssignedConsumer { get; set; }
+        public double RebalancePenaltyRemaining { get; internal set; }
 
         public Partition(string id)
         {
