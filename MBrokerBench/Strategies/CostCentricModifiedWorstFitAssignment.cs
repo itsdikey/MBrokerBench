@@ -1,5 +1,6 @@
 ﻿using MBrokerBench.Components;
 using MBrokerBench.Models;
+using Spectre.Console;
 
 namespace MBrokerBench.Strategies
 {
@@ -207,6 +208,8 @@ namespace MBrokerBench.Strategies
             // 2. Try Financial Merging (Only merges Running consumers)
             TryFinancialMerge();
 
+            TryClusterOptimization();
+
             // 3. PROACTIVE SCALE UP (The replacement for on-demand creation)
             // We calculate if there is unhandled load and provision the SPECIFIC profile needed.
             CheckAndProvisionCapacity();
@@ -251,8 +254,7 @@ namespace MBrokerBench.Strategies
                 double totalLag = partitions.Sum(p => p.CurrentLag);
                 if (totalLag > 0 && currentEffectiveCapacity <= partitions.Sum(p => p.ProductionRate))
                 {
-                    // Edge case: We fit the demand theoretically, but aren't draining. 
-                    // Allow fall-through to provision more.
+
                 }
                 else
                 {
@@ -284,6 +286,25 @@ namespace MBrokerBench.Strategies
                     // Find best profile for the CURRENT chunk of missing capacity
                     var profile = GetOptimalProfile(missingCapacity);
 
+                    var bestChoice = ConsumerGroup.ConsumerProfiles.Select(x =>
+                        new
+                        {
+                            Profile = x,
+                            EffectiveCap = x.MaxCapacity * CapacityExcessFactor,
+                            UsefulCap = Math.Min(x.MaxCapacity * CapacityExcessFactor, missingCapacity)
+                        }
+                    ).Select(x =>
+                    new
+                    {
+                        x.Profile,
+                        x.EffectiveCap,
+                        Efficiency = x.UsefulCap / x.EffectiveCap,
+                    }).OrderByDescending(x => x.Efficiency)
+                    .ThenBy(x => x.Profile.CostPerSecond)
+                    .First();
+
+                   // profile = bestChoice.Profile;
+
                     Logger.Log($"[AUTOSCALE] GAP {missingCapacity:F1} units. Provisioning {profile.Name} (Cost: ${profile.CostPerSecond}).");
 
                     Logger.Log($"   -> Spawning {profile.Name} (Cap: {profile.MaxCapacity}) to cover part of deficit.");
@@ -306,12 +327,14 @@ namespace MBrokerBench.Strategies
             var consumers = ConsumerGroup!.Consumers;
 
             // Also, don't remove if we only have 1 consumer left.
-            if (consumers.Count <= 1) return false;
+            if (consumers.Count < 1) return false;
 
             double totalDemand = ConsumerGroup.AllPartitions.Sum(p => GetTotalRequiredThroughput(p));
             double currentCapacity = consumers.Sum(c => c.MaxCapacity * CapacityExcessFactor);
 
             if (totalDemand > currentCapacity * 0.9) return false; // If we are >90% loaded globally, don't risk it.
+
+            var removed = false;
 
             var candidatesForRemoval = consumers
                 .Where(c => c.State == ConsumerState.Running)
@@ -335,16 +358,98 @@ namespace MBrokerBench.Strategies
                      )
                     .Sum(c => c.RemainingCapacityWithEfficiency);
 
-                // Using Sum() here implies we can spread the load across multiple survivors
                 if (maxSlackLeft * CapacityExcessFactor > loadToRelocate * 1.1)
                 {
                     Logger.Log($"[AUTOSCALE] Removing Inefficient Consumer {candidate.Id} ({candidate.ConsumerProfile.Name}).");
                     ConsumerGroup.RemoveConsumer(candidate);
-                    ConsumerGroup.Rebalance();
-                    return true;
+                    removed = true;
                 }
             }
-            return false;
+
+            if (removed)
+            {
+                ConsumerGroup.Rebalance();
+            }
+
+            return removed;
+        }
+
+        private void TryClusterOptimization()
+        {
+            var consumers = ConsumerGroup!.Consumers.Where(c => c.State == ConsumerState.Running).ToList();
+            if (consumers.Count < 1) return; // Optimization usually needs a group
+
+            // 1. Calculate the 'Ideal' Fleet for the current total load
+            double totalSystemLoad = consumers.Sum(c => c.AssignedPartitions.Sum(GetTotalRequiredThroughput));
+            double currentCost = consumers.Sum(c => c.ConsumerProfile.CostPerSecond);
+
+            // Solve: What is the cheapest combination of profiles to hold 'totalSystemLoad'?
+            // (This is a simplified Knapsack/Change-Making problem)
+            var idealFleet = CalculateIdealFleet(totalSystemLoad * 1.05); // 5% buffer for safety
+
+            double idealCost = idealFleet.Sum(p => p.CostPerSecond);
+
+            // 2. Check if the switch is worth it
+            // We need significant savings (e.g., 20%) to justify replacing the WHOLE fleet 
+            // or a large chunk of it.
+            double savings = currentCost - idealCost;
+
+            // Penalty is high here: We are potentially replacing N nodes with M nodes.
+            // Let's assume we replace the *entire* fleet (worst case penalty).
+            double penalty = ConsumerGroup.AllPartitions.Count * 0.5;
+
+            // If savings are huge and worth the penalty
+            if (savings > 0 && savings * 20.0 > penalty) // Higher threshold (20s payoff) for cluster-wide changes
+            {
+                Logger.Log($"[AUTOSCALE] Cluster Optimization Detected!");
+                Logger.Log($"   Current: {consumers.Count} nodes (${currentCost:F3}/s)");
+                Logger.Log($"   Target:  {string.Join(", ", idealFleet.Select(p => p.Name))} (${idealCost:F3}/s)");
+
+                // 3. EXECUTION (The tricky part)
+                // We cannot just kill everyone. We need to transition.
+                // Strategy: Spawn the Ideal Fleet *alongside* the current fleet.
+                // Once they boot, the autoscaler will naturally kill the old inefficient ones.
+
+                foreach (var profile in idealFleet)
+                {
+                    ConsumerGroup.AddConsumer(profile.Name);
+                }
+
+                // Return to prevent other actions this tick
+                return;
+            }
+        }
+
+        // Helper: Greedy approach to find cheapest combination
+        private List<ConsumerProfile> CalculateIdealFleet(double load)
+        {
+            var fleet = new List<ConsumerProfile>();
+            double remainingLoad = load;
+
+            // Sort profiles by Efficiency (Cost per Unit of Capacity)
+            var sortedProfiles = ConsumerGroup!.ConsumerProfiles
+                .OrderBy(p => p.CostPerSecond / p.MaxCapacity)
+                .ToList();
+
+            while (remainingLoad > 0)
+            {
+                // Find the most efficient profile that isn't "Too Big" (wasteful)
+                // OR just fill with the most efficient one until we are done.
+
+                // Simple Greedy: Take the most efficient profile that fills a chunk of load
+                var bestFit = GetOptimalProfile(remainingLoad);
+
+                if (bestFit == null)
+                {
+                    // Load is huge, take the largest/most efficient one to bite a chunk off
+                    bestFit = sortedProfiles.First(); // Cheapest per unit
+                }
+
+                fleet.Add(bestFit);
+                remainingLoad -= (bestFit.MaxCapacity * CapacityExcessFactor);
+            }
+
+            return fleet;
         }
 
         private void TryFinancialMerge()
