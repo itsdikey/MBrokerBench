@@ -99,7 +99,7 @@ namespace MBrokerBench
             }
             else
             {
-                var baseProvider = new SinusoidDataProvider(SinusoidDataProvider.ScenarioSkewed9);
+                var baseProvider = new PoissonDataProvider(SinusoidDataProvider.ScenarioSkewed9);
                 if (!string.IsNullOrEmpty(savePath))
                 {
                     provider = new SimulationRecorder(savePath, baseProvider);
