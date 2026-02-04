@@ -21,8 +21,8 @@ namespace MBrokerBench.DataProviders
         private readonly List<TaxiTrip> _allTrips = new();
         private const int SpeedFactor = 40;
 
-        // 2 hours (7200s) / 40 = 180 seconds of simulation
-        public int MaxRuntimeSteps { get; } = 180;
+        // 14 hours (50400s) / 40 = 1260 seconds of simulation
+        public int MaxRuntimeSteps { get; } = 1260;
 
         public NYTaxiDataProvider(string scenario = "Uniform")
         {
@@ -36,7 +36,8 @@ namespace MBrokerBench.DataProviders
             {
                 BaseUrl = "https://data.cityofnewyork.us",
                 Timeout = 120,
-                AppCredentials = ("90z5vpdemh492rvwnwqlfu66w", "55basrdth1fiapmuq044o7qeddjdeshxvqvk8085e95wk7scto")
+                AppCredentials = ("90z5vpdemh492rvwnwqlfu66w", "55basrdth1fiapmuq044o7qeddjdeshxvqvk8085e95wk7scto"),
+                EnableCaching = true
             };
             var client = new SODAV3Client(config);  //= new SODAV3Client("https://data.cityofnewyork.us", "90z5vpdemh492rvwnwqlfu66w", "55basrdth1fiapmuq044o7qeddjdeshxvqvk8085e95wk7scto"); // App Token optional for low volume
 
@@ -44,7 +45,7 @@ namespace MBrokerBench.DataProviders
             // Note: Data is often delayed, ensure you are querying a date that exists in the set
             var soql = new SoqlQuery()
                 .Select("tpep_pickup_datetime", "pulocationid")
-                .Where("tpep_pickup_datetime >= '2019-01-02T08:00:00' AND tpep_pickup_datetime < '2019-01-02T10:00:00'")
+                .Where("tpep_pickup_datetime >= '2019-01-02T08:00:00' AND tpep_pickup_datetime < '2019-01-02T22:00:00'")
                 .Order("tpep_pickup_datetime");
 
             var resource = "2upf-qytp";

@@ -122,6 +122,9 @@ public class ModifiedWorstFitAssignment : IPartitionAssignmentStrategy
 
         var allConsumers = ConsumerGroup.Consumers; // Includes Booting
         var partitions = ConsumerGroup.AllPartitions;
+        
+        // Calculate global demand
+        double totalRequiredThrougput = partitions.Sum(p => p.GetRequiredThroughput(ConsumerGroup.LatencySLASeconds));
 
         // --- SCALE DOWN CHECK ---
         // Only consider removing RUNNING consumers.
@@ -131,18 +134,33 @@ public class ModifiedWorstFitAssignment : IPartitionAssignmentStrategy
             .OrderBy(c => c.GetCurrentWorkloadRate())
             .FirstOrDefault();
 
-        if (removable != null && allConsumers.Count > 1) // Ensure we don't go to 0
+        if (removable != null && allConsumers.Count > 1) 
         {
-            Logger.Log($"[AUTOSCALE] Scaling DOWN ({removable.Id}).");
-            ConsumerGroup.RemoveConsumer(removable);
-            ConsumerGroup.Rebalance();
-            return Task.CompletedTask;
+            // SAFETY CHECK: Can the remaining fleet handle the TOTAL load?
+            // We use MaxCapacity * CapacityExcessFactor for the remaining fleet.
+            double capacityAfterRemoval = allConsumers
+                .Where(c => c != removable)
+                .Sum(c => c.MaxCapacity * CapacityExcessFactor);
+
+            if (capacityAfterRemoval >= totalRequiredThrougput)
+            {
+                Logger.Log($"[AUTOSCALE] Scaling DOWN ({removable.Id}). Load {removable.GetCurrentWorkloadRate():F1} fits into slack.");
+                ConsumerGroup.RemoveConsumer(removable);
+                ConsumerGroup.Rebalance();
+                return Task.CompletedTask;
+            }
+            else
+            {
+                // Logger.Log($"[AUTOSCALE] Prevented Panic Kill of {removable.Id}. Remaining capacity {capacityAfterRemoval:F0} < Required {totalRequiredThrougput:F0}");
+            }
         }
 
         // --- SCALE UP CHECK ---
         double totalRate = partitions.Sum(p => p.ProductionRate);
         long totalLag = partitions.Sum(p => p.GetTotalLag(ConsumerGroup.RebalanceTimeSeconds));
-        double requiredCap = totalRate + totalLag / ConsumerGroup.LatencySLASeconds;
+        
+        // We use the stricter of "Rate+Lag" or "Just Rate" (usually Rate+Lag is higher)
+        double requiredCap = totalRequiredThrougput; 
 
         int requiredCount = (int)Math.Ceiling(requiredCap / (CapacityExcessFactor * ConsumerGroup.ConsumerCapacity));
         if (partitions.Any() && requiredCount < 1) requiredCount = 1;
@@ -152,6 +170,10 @@ public class ModifiedWorstFitAssignment : IPartitionAssignmentStrategy
         if (requiredCount > allConsumers.Count)
         {
             int toAdd = requiredCount - allConsumers.Count;
+            
+            // DAMPENER: Don't add more than 3 consumers at once to prevent explosion
+            toAdd = Math.Min(toAdd, 3);
+            
             Logger.Log($"[AUTOSCALE] Scaling UP by {toAdd} (Req: {requiredCount}, Has: {allConsumers.Count}).");
             for (int i = 0; i < toAdd; i++) ConsumerGroup.AddConsumer();
             // AddConsumer triggers Rebalance internally usually, or Tick does.

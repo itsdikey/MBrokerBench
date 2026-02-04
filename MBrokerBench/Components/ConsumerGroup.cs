@@ -62,10 +62,17 @@ namespace MBrokerBench.Components
             _assignmentStrategy.ConsumerGroup = this;
         }
 
-        public Consumer AddConsumer(string? profileName = null)
+        public Consumer AddConsumer(string? profileName = null, bool instant = false)
         {
             var profile = ConsumerProfiles.FirstOrDefault(p => p.Name == profileName) ?? DefaultProfile;
             var newConsumer = new Consumer($"C-{Guid.NewGuid()}", profile);
+            
+            if (instant)
+            {
+                newConsumer.State = ConsumerState.Running;
+                newConsumer.StartupTimeRemaining = 0;
+            }
+
             Consumers.Add(newConsumer);
             _scaleUpOperations++;
             MetricsExporter.SetConsumers(Consumers.Count);

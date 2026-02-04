@@ -72,10 +72,33 @@ namespace MBrokerBench
         {
             Logger.Log("Starting Kafka Autoscaling Simulation (Config-Driven)...");
 
-            IPartitionAssignmentStrategy assignmentStrategy = new CostCentricModifiedWorstFitAssignment();
+            string strategyName = System.Environment.GetEnvironmentVariable("STRATEGY") ?? "ModifiedWorstFit";
+            IPartitionAssignmentStrategy assignmentStrategy;
+
+            switch (strategyName)
+            {
+                case "CostCentric":
+                    assignmentStrategy = new CostCentricModifiedWorstFitAssignment();
+                    break;
+                case "BootingAware":
+                    assignmentStrategy = new BootingAwareModifiedWorstFitAssignment();
+                    break;
+                case "ScaleWithLag":
+                    assignmentStrategy = new PaperLeastLoadedBinPackStrategy();
+                    break;
+                case "Linear":
+                    assignmentStrategy = new ModifiedWorstFitAssignment(); // Uses total load / capacity
+                    break;
+                case "ModifiedWorstFit":
+                default:
+                    assignmentStrategy = new ModifiedWorstFitAssignment();
+                    break;
+            }
+            
+            Logger.Log($"Selected Strategy: {assignmentStrategy.GetType().Name}");
 
             // Start metrics endpoint with strategy/run labels (from environment)
-            var strategyEnv = assignmentStrategy.GetType().Name ?? System.Environment.GetEnvironmentVariable("STRATEGY");
+            var strategyEnv = assignmentStrategy.GetType().Name;
             var runIdEnv = System.Environment.GetEnvironmentVariable("RUN_ID") ?? DateTimeOffset.UtcNow.Subtract(DateTimeOffset.UnixEpoch).TotalSeconds.ToString();//current unix epoch 
             MetricsExporter.Init(1234, strategyEnv, runIdEnv);
 
@@ -99,7 +122,17 @@ namespace MBrokerBench
             }
             else
             {
-                var baseProvider = new PoissonDataProvider(SinusoidDataProvider.ScenarioSkewed9);
+                // Select provider based on environment variable
+                string dataProviderEnv = System.Environment.GetEnvironmentVariable("DATA_PROVIDER") ?? "NYTaxi";
+                IDataProvider baseProvider = dataProviderEnv switch
+                {
+                    "Poisson" => new PoissonDataProvider(PoissonDataProvider.ScenarioSkewed9),
+                    "Sinusoid" => new SinusoidDataProvider(SinusoidDataProvider.ScenarioSkewed9),
+                    "NYTaxi" or _ => new NYTaxiDataProvider(SinusoidDataProvider.ScenarioSkewed9)
+                };
+
+                // var baseProvider = new NYTaxiDataProvider(SinusoidDataProvider.ScenarioSkewed9);
+                // var baseProvider = new PoissonDataProvider(SinusoidDataProvider.ScenarioSkewed9);
                 if (!string.IsNullOrEmpty(savePath))
                 {
                     provider = new SimulationRecorder(savePath, baseProvider);
@@ -117,7 +150,7 @@ namespace MBrokerBench
             var group = new ConsumerGroup("MyGroup", partitions, ConsumerProfiles.AllProfiles, ConsumerProfiles.Small, assignmentStrategy);
 
             // Start with 1 consumer
-            // group.AddConsumer();
+            group.AddConsumer(ConsumerProfiles.Large.Name, true);
             group.Rebalance();
 
             // Prepare CSV export for timestep series
@@ -125,12 +158,52 @@ namespace MBrokerBench
             Directory.CreateDirectory(outDir);
             var csvPath = Path.Combine(outDir, $"timeseries_{strategyEnv}_{runIdEnv}.csv");
             using var csvWriter = new StreamWriter(csvPath, false, Encoding.UTF8);
-            // Header: step, timestamp, current_system_lag, messages_pending, current_production_rate, current_consumption_rate, total_system_load, current_system_cost, total_reassignments, total_rebalance_steps
-            csvWriter.WriteLine("step,timestamp,current_system_lag,messages_pending,current_production_rate,current_consumption_rate,total_system_load,current_system_cost,total_reassignments,total_rebalance_steps,rScore_value,total_consumers");
+
+            // Build CSV header and include a column per consumer profile type
+            var headerParts = new List<string>
+            {
+                "step",
+                "timestamp",
+                "current_system_lag",
+                "messages_pending",
+                "current_production_rate",
+                "current_consumption_rate",
+                "total_system_load",
+                "current_system_cost",
+                "total_reassignments",
+                "total_rebalance_steps",
+                "rScore_value",
+                "total_consumers"
+            };
+
+            // Add some additional per-step columns
+            headerParts.Add("reassignments_this_step");
+            headerParts.Add("max_estimated_latency_seconds");
+            headerParts.Add("partitions_violating_sla");
+
+            // Add columns for each consumer profile (counts)
+            foreach (var prof in ConsumerProfiles.AllProfiles)
+            {
+                // use profile short code for compactness
+                headerParts.Add($"count_{prof.ShortCode}");
+            }
+
+            // Add per-profile production and backlog columns
+            foreach (var prof in ConsumerProfiles.AllProfiles)
+            {
+                headerParts.Add($"production_{prof.ShortCode}");
+            }
+            foreach (var prof in ConsumerProfiles.AllProfiles)
+            {
+                headerParts.Add($"backlog_{prof.ShortCode}");
+            }
+
+            csvWriter.WriteLine(string.Join(',', headerParts));
 
             var rndRate = new Random();
 
             double lastLagTime = -1;
+            int lastTotalReassignments = group.TotalReassignments;
 
             #region Plot Init
             List<int> steps = new List<int>();
@@ -183,9 +256,9 @@ namespace MBrokerBench
                 long totalLag = group.AllPartitions.Sum(p => p.CurrentLag);
 
                 double maxLagTime = group.AllPartitions
-                    .Where(p => p.CurrentLag > 0 && p.AssignedConsumer != null)
+                    .Where(p => p.AssignedConsumer != null)
                     .DefaultIfEmpty()
-                    .Max(p => p == null ? 0 : p.CurrentLag / (p.AssignedConsumer?.MaxCapacity ?? 1000));
+                    .Max(p => p == null ? 0 : (p.CurrentLag + p.ProductionRate) / (p.AssignedConsumer?.MaxCapacity ?? 1000));
 
                 var totalProductionRate = group.AllPartitions.Sum(p => p.ProductionRate);
                 var averageProductionRate = group.AllPartitions.Count > 0 ? totalProductionRate / group.AllPartitions.Count : 0.0;
@@ -268,7 +341,9 @@ namespace MBrokerBench
 
                 double currentSystemCost = group.TotalCostPerSecond;
 
-                csvWriter.WriteLine(string.Join(',', new string[] {
+                // Build base columns
+                var rowParts = new List<string>
+                {
                     step.ToString(),
                     DateTime.UtcNow.ToString("o"),
                     totalLag.ToString(),
@@ -281,7 +356,51 @@ namespace MBrokerBench
                     group.RebalanceSteps.ToString(),
                     group.RScoreValue.ToString("F5"),
                     group.Consumers.Count.ToString()
-                }));
+                };
+
+                // reassignments this step (delta)
+                var reassignmentsThisStep = group.TotalReassignments - lastTotalReassignments;
+                lastTotalReassignments = group.TotalReassignments;
+                rowParts.Add(reassignmentsThisStep.ToString());
+
+                // max estimated latency seconds
+                rowParts.Add(maxLagTime.ToString("F3"));
+
+                // partitions violating SLA
+                int partitionsViolating = group.AllPartitions.Count(p => {
+                    // if (p.CurrentLag <= 0) return false;
+                    if (p.AssignedConsumer == null) return true; // unassigned with lag -> violation
+                    double est = (p.CurrentLag + p.ProductionRate) / p.AssignedConsumer.MaxCapacity;
+                    return est > group.LatencySLASeconds;
+                });
+                rowParts.Add(partitionsViolating.ToString());
+
+                // Append counts per consumer profile in the same order as header
+                foreach (var prof in ConsumerProfiles.AllProfiles)
+                {
+                    var cnt = group.Consumers.Count(c => c.ConsumerProfile.Name == prof.Name);
+                    rowParts.Add(cnt.ToString());
+                }
+
+                // Append per-profile production (sum of production rates for partitions assigned to consumers of that profile)
+                foreach (var prof in ConsumerProfiles.AllProfiles)
+                {
+                    double prod = group.Consumers
+                        .Where(c => c.ConsumerProfile.Name == prof.Name)
+                        .Sum(c => c.AssignedPartitions.Sum(p => p.ProductionRate));
+                    rowParts.Add(prod.ToString("F3"));
+                }
+
+                // Append per-profile backlog (sum of CurrentLag for partitions assigned to consumers of that profile)
+                foreach (var prof in ConsumerProfiles.AllProfiles)
+                {
+                    double backlog = group.Consumers
+                        .Where(c => c.ConsumerProfile.Name == prof.Name)
+                        .Sum(c => c.AssignedPartitions.Sum(p => p.CurrentLag));
+                    rowParts.Add(backlog.ToString("F0"));
+                }
+
+                csvWriter.WriteLine(string.Join(',', rowParts));
 
                 csvWriter.Flush();
 
@@ -295,13 +414,13 @@ namespace MBrokerBench
                     {
                         Logger.Log($"[ALERT] System lag is INCREASING! (+{lagChange:F2} seconds this step)");
 
-                        Console.ReadLine();
+                        // Console.ReadLine();
                     }
                 }
 
                 lastLagTime = maxLagTime;
 
-                Thread.Sleep(200);
+                Thread.Sleep(10);
             }
 
             // close csv writer by disposing via using
@@ -324,12 +443,12 @@ namespace MBrokerBench
 
             await MetricsExporter.Finalizer();
 
-            Console.ReadLine();
+            // Console.ReadLine();
 
-            while (true)
-            {
-                System.Threading.Thread.Sleep(10000);
-            }
+            // while (true)
+            // {
+            //     System.Threading.Thread.Sleep(10000);
+            // }
 
             // Allow metrics server to be stopped gracefully
             MetricsExporter.Stop().Wait();
