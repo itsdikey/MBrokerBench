@@ -15,7 +15,7 @@ namespace MBrokerBench.DataProviders
     /// <summary>
     /// https://dev.socrata.com/foundry/data.cityofnewyork.us/2upf-qytp
     /// </summary>
-    public sealed class NYTaxiDataProvider : IDataProvider
+    public sealed class NYTaxiDataProvider : IDataProvider, IScenarioOwner
     {
         private readonly string _scenario;
         private readonly List<TaxiTrip> _allTrips = new();
@@ -23,6 +23,8 @@ namespace MBrokerBench.DataProviders
 
         // 14 hours (50400s) / 40 = 1260 seconds of simulation
         public int MaxRuntimeSteps { get; } = 1260;
+
+        public string ScenarioName => _scenario;
 
         public NYTaxiDataProvider(string scenario = "Uniform")
         {

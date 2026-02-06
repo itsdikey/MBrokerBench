@@ -1,15 +1,14 @@
 ﻿using MBrokerBench.Components;
-using System;
-using System.Collections.Generic;
-using System.Linq;
 
 namespace MBrokerBench.DataProviders
 {
-    public sealed class SinusoidDataProvider : IDataProvider
+    public sealed class SinusoidDataProvider : IDataProvider, IScenarioOwner
     {
         public const string ScenarioUniform = "Uniform";
         public const string ScenarioSkewed5 = "Skewed5";
         public const string ScenarioSkewed9 = "Skewed9";
+
+        public string ScenarioName => _scenario;
 
         private readonly Random _rng = new();
         private readonly string _scenario;

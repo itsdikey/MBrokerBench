@@ -2,7 +2,7 @@
 
 namespace MBrokerBench.DataProviders
 {
-    public sealed class PoissonDataProvider : IDataProvider
+    public sealed class PoissonDataProvider : IDataProvider, IScenarioOwner
     {
         public const string ScenarioUniform = "Uniform";
         public const string ScenarioSkewed5 = "Skewed5";
@@ -11,6 +11,8 @@ namespace MBrokerBench.DataProviders
 
         private readonly Random _rng = new ();
         private readonly string _scenario;
+
+        public string ScenarioName => _scenario;
 
         // 20 minute duration (1200 seconds)
         public int MaxRuntimeSteps { get; } = 1200;
