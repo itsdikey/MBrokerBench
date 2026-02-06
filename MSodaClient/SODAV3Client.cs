@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.IO;
 using System.Text.Json;
 using System.Text;
+using System.Threading;
 
 namespace MSodaClient
 {
@@ -27,15 +28,31 @@ namespace MSodaClient
         /// Optional file path to persist the cache. If null a default location under LocalApplicationData will be used.
         /// </summary>
         public string? CacheFilePath { get; set; }
+
+        /// <summary>
+        /// How often (seconds) to persist the in-memory cache to disk. Default 1 seconds.
+        /// </summary>
+        public int CachePersistIntervalSeconds { get; set; } = 1;
+
+        /// <summary>
+        /// Maximum number of cache entries to keep when persisting. 0 means unlimited. Default 0.
+        /// </summary>
+        public int CacheMaxEntries { get; set; } = 0;
     }
 
-    public sealed class SODAV3Client
+    public sealed class SODAV3Client : IDisposable
     {
         private readonly HttpClient _httpClient;
         private readonly SODAV3ClientConfig? _config;
 
         // Simple in-memory cache: key -> (value, expiresUtc)
         private readonly ConcurrentDictionary<string, (object Value, DateTime ExpiresUtc)> _cache = new();
+
+        // File save synchronization
+        private readonly SemaphoreSlim _fileLock = new(1,1);
+        private readonly Timer? _saveTimer;
+        private volatile bool _dirty = false;
+        private bool _disposed = false;
 
         public SODAV3Client(SODAV3ClientConfig? config = null)
         {
@@ -83,6 +100,10 @@ namespace MSodaClient
                     {
                         Debug.WriteLine($"Failed to load cache from file: {ex}");
                     }
+
+                    // Start a periodic timer to persist the cache occasionally instead of on every update
+                    var interval = Math.Max(1, config.CachePersistIntervalSeconds);
+                    _saveTimer = new Timer(async _ => await SaveCacheToFileAsync().ConfigureAwait(false), null, TimeSpan.FromSeconds(interval), TimeSpan.FromSeconds(interval));
                 }
             }
         }
@@ -93,6 +114,7 @@ namespace MSodaClient
         public void ClearCache()
         {
             _cache.Clear();
+            _dirty = false;
             try
             {
                 var path = GetCacheFilePath();
@@ -118,8 +140,7 @@ namespace MSodaClient
                 _cache.TryRemove(k, out _);
             }
 
-            // Persist changes
-            _ = SaveCacheToFileAsync();
+            _dirty = true;
         }
 
         private static string BuildCacheKey(string requestUri, string body)
@@ -160,7 +181,7 @@ namespace MSodaClient
                 {
                     // expired
                     _cache.TryRemove(key, out _);
-                    _ = SaveCacheToFileAsync();
+                    _dirty = true;
                 }
             }
             return false;
@@ -173,8 +194,8 @@ namespace MSodaClient
             var expires = DateTime.UtcNow.AddSeconds(ttl);
             _cache[key] = (value, expires);
 
-            // Persist cache asynchronously; fire-and-forget
-            _ = SaveCacheToFileAsync();
+            // Mark dirty; periodic timer will persist. This avoids heavy IO on rapid updates.
+            _dirty = true;
         }
 
         private string GetCacheFilePath()
@@ -224,16 +245,23 @@ namespace MSodaClient
 
         private async Task SaveCacheToFileAsync()
         {
+            if (_config?.EnableCaching != true) return;
+            if (!_dirty) return; // nothing to do
+
+            await _fileLock.WaitAsync().ConfigureAwait(false);
             try
             {
+                // Re-check dirty under lock
+                if (!_dirty) return;
+
                 var path = GetCacheFilePath();
                 var dir = Path.GetDirectoryName(path);
                 if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
+                // Build dictionary snapshot, excluding expired entries
                 var dict = new Dictionary<string, CacheFileEntryDto>();
                 foreach (var kv in _cache)
                 {
-                    // skip expired entries during save
                     if (kv.Value.ExpiresUtc <= DateTime.UtcNow) continue;
 
                     string kind;
@@ -258,12 +286,44 @@ namespace MSodaClient
                     };
                 }
 
+                // Trim to max entries if configured
+                if (_config.CacheMaxEntries > 0 && dict.Count > _config.CacheMaxEntries)
+                {
+                    var ordered = dict.OrderBy(kv => kv.Value.ExpiresUtc).ToList();
+                    int removeCount = dict.Count - _config.CacheMaxEntries;
+                    for (int i = 0; i < removeCount; i++)
+                    {
+                        dict.Remove(ordered[i].Key);
+                    }
+                }
+
                 var json = JsonSerializer.Serialize(dict);
-                await File.WriteAllTextAsync(path, json).ConfigureAwait(false);
+
+                // atomic write: write to temp file then move
+                var tmp = path + ".tmp";
+                await File.WriteAllTextAsync(tmp, json).ConfigureAwait(false);
+
+                // Replace/Move across filesystems safely if possible
+                try
+                {
+                    File.Move(tmp, path, true);
+                }
+                catch (PlatformNotSupportedException)
+                {
+                    // fallback
+                    if (File.Exists(path)) File.Delete(path);
+                    File.Move(tmp, path);
+                }
+
+                _dirty = false;
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"Error saving cache file: {ex}");
+            }
+            finally
+            {
+                _fileLock.Release();
             }
         }
 
@@ -378,6 +438,33 @@ namespace MSodaClient
             SetCachedValue(cacheKey, bytes);
 
             return bytes;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+
+            // Stop timer
+            try
+            {
+                _saveTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+                _saveTimer?.Dispose();
+            }
+            catch { }
+
+            // Flush cache synchronously
+            try
+            {
+                SaveCacheToFileAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Error flushing cache on dispose: {ex}");
+            }
+
+            _fileLock.Dispose();
+            _httpClient.Dispose();
         }
     }
 }

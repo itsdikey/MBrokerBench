@@ -72,26 +72,33 @@ namespace MBrokerBench
         {
             Logger.Log("Starting Kafka Autoscaling Simulation (Config-Driven)...");
 
-            string strategyName = System.Environment.GetEnvironmentVariable("STRATEGY") ?? "ModifiedWorstFit";
+            string strategyName = System.Environment.GetEnvironmentVariable("STRATEGY") ?? "CostCentric";
             IPartitionAssignmentStrategy assignmentStrategy;
+
+            var shortCodeAlgorithm = "unknown";
 
             switch (strategyName)
             {
                 case "CostCentric":
                     assignmentStrategy = new CostCentricModifiedWorstFitAssignment();
+                    shortCodeAlgorithm = "cc_mwf";
                     break;
                 case "BootingAware":
                     assignmentStrategy = new BootingAwareModifiedWorstFitAssignment();
+                    shortCodeAlgorithm = "ba_mwf";
                     break;
                 case "ScaleWithLag":
                     assignmentStrategy = new PaperLeastLoadedBinPackStrategy();
+                    shortCodeAlgorithm = "swl";
                     break;
                 case "Linear":
                     assignmentStrategy = new ModifiedWorstFitAssignment(); // Uses total load / capacity
+                    shortCodeAlgorithm = "linear";
                     break;
                 case "ModifiedWorstFit":
                 default:
                     assignmentStrategy = new ModifiedWorstFitAssignment();
+                    shortCodeAlgorithm = "mwf";
                     break;
             }
             
@@ -116,6 +123,8 @@ namespace MBrokerBench
 
             dynamic provider;
 
+            string providerName = "";
+
             if (!string.IsNullOrEmpty(replayPath))
             {
                 provider = new ReplayDataProvider(replayPath);
@@ -123,13 +132,16 @@ namespace MBrokerBench
             else
             {
                 // Select provider based on environment variable
-                string dataProviderEnv = System.Environment.GetEnvironmentVariable("DATA_PROVIDER") ?? "NYTaxi";
+                string dataProviderEnv = System.Environment.GetEnvironmentVariable("DATA_PROVIDER") ?? "Poisson";
                 IDataProvider baseProvider = dataProviderEnv switch
                 {
                     "Poisson" => new PoissonDataProvider(PoissonDataProvider.ScenarioSkewed9),
-                    "Sinusoid" => new SinusoidDataProvider(SinusoidDataProvider.ScenarioSkewed9),
-                    "NYTaxi" or _ => new NYTaxiDataProvider(SinusoidDataProvider.ScenarioSkewed9)
+                    "Sinusoid" => new SinusoidDataProvider(SinusoidDataProvider.ScenarioUniform),
+                    "NYTaxi" or _ => new NYTaxiDataProvider(SinusoidDataProvider.ScenarioUniform)
                 };
+
+
+                providerName = dataProviderEnv + ((baseProvider is IScenarioOwner so)?$"_{so.ScenarioName}":"");
 
                 // var baseProvider = new NYTaxiDataProvider(SinusoidDataProvider.ScenarioSkewed9);
                 // var baseProvider = new PoissonDataProvider(SinusoidDataProvider.ScenarioSkewed9);
@@ -146,16 +158,14 @@ namespace MBrokerBench
             var partitions = provider.InitializePartitions();
             int maxRuntime = provider.MaxRuntimeSteps > 0 ? provider.MaxRuntimeSteps : 600;
 
-            // Initialize consumer group
-            var group = new ConsumerGroup("MyGroup", partitions, ConsumerProfiles.AllProfiles, ConsumerProfiles.Small, assignmentStrategy);
-
-            // Start with 1 consumer
-            group.AddConsumer(ConsumerProfiles.Large.Name, true);
-            group.Rebalance();
-
             // Prepare CSV export for timestep series
             var outDir = Path.Combine(AppContext.BaseDirectory, "export_csv");
             Directory.CreateDirectory(outDir);
+
+            string resultAnalytics = Path.Combine(outDir, $"analysis_{shortCodeAlgorithm}_{providerName}.csv");
+
+            // Initialize consumer group
+            var group = new ConsumerGroup("MyGroup", partitions, ConsumerProfiles.AllProfiles, ConsumerProfiles.Large, assignmentStrategy);
             var csvPath = Path.Combine(outDir, $"timeseries_{strategyEnv}_{runIdEnv}.csv");
             using var csvWriter = new StreamWriter(csvPath, false, Encoding.UTF8);
 
@@ -204,6 +214,11 @@ namespace MBrokerBench
 
             double lastLagTime = -1;
             int lastTotalReassignments = group.TotalReassignments;
+
+            double sumProductionRate = 0;
+            double sumCost = 0;
+            double sumMaxLatency = 0;
+            int totalViolationSteps = 0;
 
             #region Plot Init
             List<int> steps = new List<int>();
@@ -375,6 +390,15 @@ namespace MBrokerBench
                 });
                 rowParts.Add(partitionsViolating.ToString());
 
+                // Metrics Tracking for final output
+                sumProductionRate += totalProductionRate;
+                sumCost += currentSystemCost;
+                sumMaxLatency += maxLagTime;
+                if (partitionsViolating > 0)
+                {
+                    totalViolationSteps++;
+                }
+
                 // Append counts per consumer profile in the same order as header
                 foreach (var prof in ConsumerProfiles.AllProfiles)
                 {
@@ -420,12 +444,33 @@ namespace MBrokerBench
 
                 lastLagTime = maxLagTime;
 
-                Thread.Sleep(10);
+                Thread.Sleep(1);
             }
 
             // close csv writer by disposing via using
             csvWriter.Close();
             csvWriter.Dispose();
+
+            // Output Final Results
+            double finalAvgProd = sumProductionRate / maxRuntime;
+            double finalAvgCost = sumCost / maxRuntime;
+            double finalAvgLat = sumMaxLatency / maxRuntime;
+            int finalViolDur = totalViolationSteps * (int)TimeStepSeconds;
+
+            Logger.Enabled = true;
+            Logger.Log("\n" + new string('=', 60));
+            Logger.Log("FINAL SIMULATION SUMMARY");
+            Logger.Log(new string('=', 60));
+            Logger.Log($"{"Avg Prod (msg/s):",-20} {finalAvgProd:F2}");
+            Logger.Log($"{"Avg Cost ($):",-20} {finalAvgCost:F2}");
+            Logger.Log($"{"Avg Latency (s):",-20} {finalAvgLat:F2}");
+            Logger.Log($"{"Viol. Dur. (s):",-20} {finalViolDur}");
+            Logger.Log(new string('=', 60));
+            Logger.Log($"{finalAvgProd:F2}\t{finalAvgCost:F2}\t{finalAvgLat:F2}\t{finalViolDur}");
+            Logger.Log(new string('=', 60) + "\n");
+
+            // Write final summary to resultAnalytics file for later processing
+            File.WriteAllText(resultAnalytics, $"{finalAvgProd:F2},{finalAvgCost:F2},{finalAvgLat:F2},{finalViolDur}");
 
             // If we recorded the simulation, save it now
             if (provider is SimulationRecorder recorder)
