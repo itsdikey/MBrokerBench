@@ -18,7 +18,7 @@ namespace MBrokerBench.DataProviders
 
         public List<Partition> InitializePartitions()
         {
-            return _rec.InitialPartitions.Select(p => new Partition(p.Id) { ProductionRate = p.ProductionRate, CurrentLag = p.CurrentLag }).ToList();
+            return _rec.InitialPartitions.Select(p => new Partition(p.Id) { ProductionRate = p.ProductionRate }).ToList();
         }
 
         public List<Partition> Process(List<Partition> partitions, int timeStep)
@@ -34,11 +34,10 @@ namespace MBrokerBench.DataProviders
                     if (p != null)
                     {
                         p.ProductionRate = pr.ProductionRate;
-                        p.CurrentLag = pr.CurrentLag;
                     }
                     else
                     {
-                        var np = new Partition(pr.Id) { ProductionRate = pr.ProductionRate, CurrentLag = pr.CurrentLag };
+                        var np = new Partition(pr.Id) { ProductionRate = pr.ProductionRate };
                         partitions.Add(np);
                     }
                 }

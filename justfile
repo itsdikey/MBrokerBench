@@ -1,8 +1,9 @@
 set shell := ["powershell.exe", "-NoProfile", "-Command"]
 
 # MBrokerBench Phase 0 Automation
+STRIMZI_IMAGE := "quay.io/strimzi/kafka:0.50.1-kafka-4.1.1"
 
-# Run the full setup
+# Run the full setup from scratch
 up: cluster-up strimzi-up kafka-up obs-up
 
 # Create k3d cluster with 3 agents
@@ -22,11 +23,11 @@ strimzi-up:
 	helm repo update
 	helm upgrade --install strimzi-operator strimzi/strimzi-kafka-operator
 
-# Deploy Kafka KRaft using Strimzi
+# Deploy Kafka with Metrics (Clean Stack)
 kafka-up:
-	@echo "Deploying Kafka KRaft cluster..."
-	kubectl apply -f https://raw.githubusercontent.com/strimzi/strimzi-kafka-operator/main/examples/kafka/kafka-single-node.yaml
-	@echo "Waiting for Kafka to be ready (this may take a few minutes)..."
+	@echo "Deploying Kafka Stack (ConfigMap + Cluster)..."
+	kubectl apply -f k8s/init-stack.yaml
+	@echo "Waiting for Kafka to be ready..."
 	kubectl wait kafka/my-cluster --for=condition=Ready --timeout=300s
 
 # Deploy Observability (Seq and Prometheus)
@@ -43,7 +44,8 @@ obs-up:
 	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 	helm repo update
 	helm upgrade --install prometheus prometheus-community/prometheus \
-	--set server.service.type=ClusterIP
+	--set server.service.type=NodePort \
+	-f k8s/prometheus-kafka-scrape.yaml
 
 # Port Forwarding for UIs
 forward-seq:
@@ -56,28 +58,42 @@ forward-prom:
 
 forward-kafka:
 	@echo "Forwarding Kafka bootstrap to localhost:9092..."
-	kubectl port-forward svc/my-cluster-kafka-bootstrap 9092:9092
+	kubectl port-forward svc/my-cluster-kafka-external-bootstrap 9092:9092
 
 # Kafka Interaction
 create-topic topic partitions="6":
 	-kubectl delete pod kafka-admin --ignore-not-found=true
-	kubectl run kafka-admin -ti -q --restart='Never' --image='quay.io/strimzi/kafka:0.41.0-kafka-3.7.0' --rm=true -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server my-cluster-kafka-bootstrap:9092 --create --topic {{topic}} --partitions {{partitions}} --replication-factor 1
+	kubectl run kafka-admin -ti -q --restart='Never' --image={{STRIMZI_IMAGE}} --rm=true -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server my-cluster-kafka-bootstrap:9093 --create --topic {{topic}} --partitions {{partitions}} --replication-factor 1
 
 list-topics:
 	-kubectl delete pod kafka-admin --ignore-not-found=true
-	kubectl run kafka-admin -ti -q --restart='Never' --image='quay.io/strimzi/kafka:0.41.0-kafka-3.7.0' --rm=true -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server my-cluster-kafka-bootstrap:9092 --list
+	kubectl run kafka-admin -ti -q --restart='Never' --image={{STRIMZI_IMAGE}} --rm=true -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server my-cluster-kafka-bootstrap:9093 --list
 
 produce topic:
 	-kubectl delete pod kafka-producer --ignore-not-found=true
-	kubectl run kafka-producer -ti --image='quay.io/strimzi/kafka:0.41.0-kafka-3.7.0' --rm=true --restart='Never' -- /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server my-cluster-kafka-bootstrap:9092 --topic {{topic}}
+	kubectl run kafka-producer -ti --image={{STRIMZI_IMAGE}} --rm=true --restart='Never' -- /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server my-cluster-kafka-bootstrap:9093 --topic {{topic}}
 
 consume topic:
 	-kubectl delete pod kafka-consumer --ignore-not-found=true
-	kubectl run kafka-consumer -ti --image='quay.io/strimzi/kafka:0.41.0-kafka-3.7.0' --rm=true --restart='Never' -- /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server my-cluster-kafka-bootstrap:9092 --topic {{topic}} --from-beginning
+	kubectl run kafka-consumer -ti --image={{STRIMZI_IMAGE}} --rm=true --restart='Never' -- /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server my-cluster-kafka-bootstrap:9093 --topic {{topic}} --from-beginning
+
+# Stress test a topic with random data to simulate production rate
+stress-topic topic messages="1000000":
+	-kubectl delete pod kafka-stress --ignore-not-found=true
+	kubectl run kafka-stress -ti --image={{STRIMZI_IMAGE}} --rm=true --restart='Never' -- /opt/kafka/bin/kafka-producer-perf-test.sh --topic {{topic}} --num-records {{messages}} --record-size 100 --throughput 1000 --producer-props bootstrap.servers=my-cluster-kafka-bootstrap:9093
+
+# Run Phase 1 Simulation (Real Metrics, Virtual Consumers)
+run-kafka-sim:
+	$env:DATA_PROVIDER="Kafka"; \
+	$env:KAFKA_BOOTSTRAP="localhost:9092"; \
+	$env:PROMETHEUS_URL="http://localhost:9090"; \
+	$env:KAFKA_TOPIC="test-1"; \
+	$env:KAFKA_GROUP="test-group"; \
+	dotnet run --project MBrokerBench/MBrokerBench.csproj
 
 # Utility to clean stuck pods
 clean-pods:
-	kubectl delete pod kafka-admin kafka-producer kafka-consumer --ignore-not-found=true
+	kubectl delete pod kafka-admin kafka-producer kafka-consumer kafka-stress --ignore-not-found=true
 
 # Check dependencies
 check:

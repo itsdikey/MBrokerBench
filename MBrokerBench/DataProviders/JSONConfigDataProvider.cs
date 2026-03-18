@@ -99,7 +99,7 @@ namespace MBrokerBench.DataProviders
                     {
                         foreach (var pc in cfg.InitialPartitions)
                         {
-                            var p = new Partition(pc.Id) { ProductionRate = pc.ProductionRate, CurrentLag = pc.CurrentLag };
+                            var p = new Partition(pc.Id) { ProductionRate = pc.ProductionRate };
                             list.Add(p);
                             _baseRates[p.Id] = p.ProductionRate;
                         }
@@ -119,7 +119,7 @@ namespace MBrokerBench.DataProviders
                         var id = pc.GetProperty("Id").GetString() ?? string.Empty;
                         var rate = pc.GetProperty("ProductionRate").GetDouble();
                         var lag = pc.GetProperty("CurrentLag").GetInt64();
-                        var p = new Partition(id) { ProductionRate = rate, CurrentLag = lag };
+                        var p = new Partition(id) { ProductionRate = rate };
                         list.Add(p);
                         _baseRates[p.Id] = p.ProductionRate;
                     }
@@ -139,7 +139,7 @@ namespace MBrokerBench.DataProviders
                     {
                         double rate = prMin + rnd.NextDouble() * (prMax - prMin);
                         long lag = rnd.NextInt64(lagMin, lagMax + 1);
-                        var p = new Partition($"P-{i + 1}") { ProductionRate = rate, CurrentLag = lag };
+                        var p = new Partition($"P-{i + 1}") { ProductionRate = rate};
                         list.Add(p);
                         _baseRates[p.Id] = p.ProductionRate;
                     }
@@ -185,7 +185,7 @@ namespace MBrokerBench.DataProviders
                         {
                             if (!partitions.Any(x => x.Id == pid))
                             {
-                                var newP = new Partition(pid) { ProductionRate = e.GetProperty("ProductionRate").GetDouble(), CurrentLag = e.GetProperty("CurrentLag").GetInt64() };
+                                var newP = new Partition(pid) { ProductionRate = e.GetProperty("ProductionRate").GetDouble()};
                                 partitions.Add(newP);
                                 _baseRates[newP.Id] = newP.ProductionRate;
                             }

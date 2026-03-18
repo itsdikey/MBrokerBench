@@ -3,6 +3,16 @@
     "MBrokerBench": {
       "commandName": "Project"
     },
+    "Kafka": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "DATA_PROVIDER": "Kafka",
+        "KAFKA_BOOTSTRAP": "localhost:9092",
+        "PROMETHEUS_URL": "http://localhost:9090",
+        "KAFKA_TOPIC": "test-1",
+        "KAFKA_GROUP": "test-group"
+      }
+    },
     "WSL": {
       "commandName": "WSL2",
       "distributionName": ""

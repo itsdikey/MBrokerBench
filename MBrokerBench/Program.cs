@@ -137,6 +137,12 @@ namespace MBrokerBench
                 {
                     "Poisson" => new PoissonDataProvider(PoissonDataProvider.ScenarioSkewed9),
                     "Sinusoid" => new SinusoidDataProvider(SinusoidDataProvider.ScenarioUniform),
+                    "Kafka" => new KafkaDataProvider(
+                        System.Environment.GetEnvironmentVariable("KAFKA_BOOTSTRAP") ?? "localhost:9092",
+                        System.Environment.GetEnvironmentVariable("PROMETHEUS_URL") ?? "http://localhost:9090",
+                        System.Environment.GetEnvironmentVariable("KAFKA_TOPIC") ?? "test-1",
+                        System.Environment.GetEnvironmentVariable("KAFKA_GROUP") ?? "test-group"
+                    ),
                     "NYTaxi" or _ => new NYTaxiDataProvider(SinusoidDataProvider.ScenarioUniform)
                 };
 

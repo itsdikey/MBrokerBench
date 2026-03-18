@@ -1,0 +1,31 @@
+extraScrapeConfigs: |
+  - job_name: "kafka"
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+            - default
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_strimzi_io_name]
+        action: keep
+        regex: my-cluster-kafka
+      - source_labels: [__address__]
+        action: replace
+        regex: ([^:]+)(?::\d+)?
+        replacement: $1:9404
+        target_label: __address__
+  - job_name: "kafka-exporter"
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+            - default
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_strimzi_io_name]
+        action: keep
+        regex: my-cluster-kafka-exporter
+      - source_labels: [__address__]
+        action: replace
+        regex: ([^:]+)(?::\d+)?
+        replacement: $1:9404
+        target_label: __address__

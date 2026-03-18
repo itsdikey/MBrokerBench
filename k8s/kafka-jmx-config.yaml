@@ -1,0 +1,20 @@
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+rules:
+  - pattern: kafka.server<type=(.+), name=(.+)><>(Count|Value)
+    name: kafka_server_$1_$2
+  - pattern: kafka.controller<type=(.+), name=(.+)><>(Count|Value)
+    name: kafka_controller_$1_$2
+  - pattern: kafka.network<type=(.+), name=(.+)><>(Count|Value)
+    name: kafka_network_$1_$2
+  - pattern: kafka.log<type=(.+), name=(.+), topic=(.+), partition=(.+)><>(Value)
+    name: kafka_log_$1_$2
+    labels:
+      topic: "$3"
+      partition: "$4"
+  - pattern: "kafka.server<type=FetcherStats, name=BytesPerSec, clientId=(.+), topic=(.+), partition=(.+)><>Count"
+    name: kafka_server_fetcherstats_bytespersec
+    labels:
+      clientId: "$1"
+      topic: "$2"
+      partition: "$3"
