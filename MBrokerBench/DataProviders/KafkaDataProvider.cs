@@ -16,6 +16,7 @@ namespace MBrokerBench.DataProviders
         public int MaxRuntimeSteps { get; } = int.MaxValue; // Run until stopped
 
         private readonly Dictionary<int, long> _previousOffsets = new();
+        private DateTime _lastUpdateTime = DateTime.MinValue;
 
         public KafkaDataProvider(string bootstrapServers, string prometheusUrl, string topic, string consumerGroup)
         {
@@ -74,6 +75,14 @@ namespace MBrokerBench.DataProviders
 
         public List<Components.Partition> Process(List<Components.Partition> partitions, int timeStep)
         {
+            var now = DateTime.UtcNow;
+            if ((now - _lastUpdateTime).TotalSeconds < 1.0)
+            {
+                return partitions;
+            }
+
+            _lastUpdateTime = now;
+
             foreach (var partition in partitions)
             {
                 int partitionId = int.Parse(partition.Id);
@@ -87,14 +96,10 @@ namespace MBrokerBench.DataProviders
 
                     if (_previousOffsets.TryGetValue(partitionId, out long lastRealOffset))
                     {
+                        // The rate is (current - last) over the interval (which is ~1s)
                         partition.ProductionRate = Math.Max(0, currentRealOffset - lastRealOffset);
                     }
                     _previousOffsets[partitionId] = currentRealOffset;
-
-                    if (partition.ProductionRate > 0)
-                    {
-                         Console.WriteLine($"[Kafka] P{partitionId}: RealOffset={currentRealOffset} (+{partition.ProductionRate} msgs/s)");
-                    }
                 }
                 catch (Exception ex)
                 {

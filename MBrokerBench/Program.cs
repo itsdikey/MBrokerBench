@@ -1,4 +1,5 @@
-﻿using ConsolePlot;
+﻿#define PRETTY
+using ConsolePlot;
 using ConsolePlot.Drawing.Tools;
 using MBrokerBench.Components;
 using MBrokerBench.DataProviders;
@@ -6,6 +7,7 @@ using MBrokerBench.Models;
 using MBrokerBench.Strategies;
 using Microsoft.Extensions.Logging;
 using System.Text;
+using Terminal.Gui;
 
 namespace MBrokerBench
 {
@@ -15,6 +17,9 @@ namespace MBrokerBench
         // Set to false to silence all Logger.Log calls.
         public static bool Enabled { get; set; } = true;
 
+        public static List<string> Logs { get; } = new List<string>();
+        public static Action<string>? OnLog { get; set; }
+
         public static void Log(string message, LogLevel logLevel = LogLevel.Information)
         {
             if (!Enabled)
@@ -22,6 +27,15 @@ namespace MBrokerBench
                 return;
             }
 
+#if PRETTY
+            var logLine = $"[{DateTime.Now:HH:mm:ss}] {message}";
+            lock (Logs)
+            {
+                Logs.Add(logLine);
+                if (Logs.Count > 100) Logs.RemoveAt(0);
+            }
+            OnLog?.Invoke(logLine);
+#else
             var oldColor = Console.ForegroundColor;
             Console.ForegroundColor = logLevel switch
             {
@@ -33,26 +47,12 @@ namespace MBrokerBench
             };
             Console.WriteLine(message);
             Console.ForegroundColor = oldColor;
+#endif
         }
 
         public static void Log(string format, LogLevel logLevel = LogLevel.Information, params object[] args)
         {
-            if (!Enabled)
-            {
-                return;
-            }
-
-            var oldColor = Console.ForegroundColor;
-            Console.ForegroundColor = logLevel switch
-            {
-                LogLevel.Information => ConsoleColor.White,
-                LogLevel.Warning => ConsoleColor.Yellow,
-                LogLevel.Error => ConsoleColor.Red,
-                LogLevel.Debug => ConsoleColor.Gray,
-                _ => ConsoleColor.White,
-            };
-            Console.WriteLine(format, args);
-            Console.ForegroundColor = oldColor;
+            Log(string.Format(format, args), logLevel);
         }
     }
 
@@ -68,7 +68,109 @@ namespace MBrokerBench
 
         public const DebugMode Mode = DebugMode.Console;
 
+#if PRETTY
+        private static Window? _logWin;
+        private static ListView? _logListView;
+        private static Window? _statusWin;
+        private static Label? _statusLabel;
+        private static Window? _partitionWin;
+        private static ListView? _partitionListView;
+        private static Window? _consumerWin;
+        private static ListView? _consumerListView;
+#endif
+
         public static async Task Main()
+        {
+#if PRETTY
+            Application.Init();
+            var top = Application.Top;
+
+            var win = new Window("MBrokerBench - Kafka Autoscaling Simulation")
+            {
+                X = 0,
+                Y = 0,
+                Width = Dim.Fill(),
+                Height = Dim.Fill()
+            };
+
+            _statusWin = new Window("Status")
+            {
+                X = 0,
+                Y = 0,
+                Width = Dim.Percent(30),
+                Height = 10
+            };
+            _statusLabel = new Label("Initializing...") { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+            _statusWin.Add(_statusLabel);
+
+            _partitionWin = new Window("Partitions")
+            {
+                X = Pos.Right(_statusWin),
+                Y = 0,
+                Width = Dim.Percent(40),
+                Height = 10
+            };
+            _partitionListView = new ListView(new List<string>()) { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+            _partitionWin.Add(_partitionListView);
+
+            _consumerWin = new Window("Consumers")
+            {
+                X = Pos.Right(_partitionWin),
+                Y = 0,
+                Width = Dim.Fill(),
+                Height = 10
+            };
+            _consumerListView = new ListView(new List<string>()) { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+            _consumerWin.Add(_consumerListView);
+
+            _logWin = new Window("Logs")
+            {
+                X = 0,
+                Y = 10,
+                Width = Dim.Fill(),
+                Height = Dim.Fill()
+            };
+            _logListView = new ListView(Logger.Logs) { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+            _logWin.Add(_logListView);
+
+            win.Add(_statusWin, _partitionWin, _consumerWin, _logWin);
+            top.Add(win);
+
+            top.KeyPress += (e) =>
+            {
+                if (e.KeyEvent.Key == Key.Q || e.KeyEvent.Key == (Key)'q')
+                {
+                    Application.RequestStop();
+                }
+            };
+
+            Logger.OnLog = (msg) =>
+            {
+                Application.MainLoop.Invoke(() =>
+                {
+                    try
+                    {
+                        //_logListView.SetSource(Logger.Logs.ToList());
+                        //_logListView.SelectedItem = Logger.Logs.Count - 1;
+                        //_logListView.TopItem = Math.Max(0, Logger.Logs.Count - 1);
+                    }
+                    catch
+                    {
+                        // Ignore if logs are empty or index out of range
+                    }
+                });
+            };
+
+            var simTask = Task.Run(async () => await RunSimulation());
+            
+            Application.Run();
+            return;
+#else
+            await RunSimulation();
+#endif
+        }
+
+        private static async Task RunSimulation()
         {
             Logger.Log("Starting Kafka Autoscaling Simulation (Config-Driven)...");
 
@@ -434,6 +536,30 @@ namespace MBrokerBench
 
                 csvWriter.Flush();
 
+#if PRETTY
+                Application.MainLoop.Invoke(() =>
+                {
+                    _statusLabel.Text = $"Step: {step}/{maxRuntime}\n" +
+                                        $"Total Lag: {totalLag}\n" +
+                                        $"Prod Rate: {totalProductionRate:F1}\n" +
+                                        $"Cons Rate: {consumptionRate:F1}\n" +
+                                        $"Avg Prod:  {averageProductionRate:F1}\n" +
+                                        $"Max Lat:   {maxLagTime:F2}s\n" +
+                                        $"SLA:       {group.LatencySLASeconds}s\n" +
+                                        $"Cost:      ${group.TotalCostPerSecond:F2}\n" +
+                                        $"Consumers: {group.Consumers.Count}";
+
+                    var pList = group.AllPartitions.Select(p => 
+                        $"P{p.Id}: L={p.CurrentLag,6} R={p.ProductionRate,5:F0} {(p.AssignedConsumer != null ? "Assigned" : "UNASSIGNED")}"
+                    ).ToList();
+                    _partitionListView.SetSource(pList);
+
+                    var cList = group.Consumers.Select(c => 
+                        $"{c.Id} [{c.ConsumerProfile.ShortCode}] {c.State} L={c.GetCurrentTotalLag(0),6} U={(c.GetCurrentWorkloadRate()/c.MaxCapacity*100),3:F0}% P={c.AssignedPartitions.Count}"
+                    ).ToList();
+                    _consumerListView.SetSource(cList);
+                });
+#endif
 
                 if (lastLagTime != -1)
                 {
@@ -494,17 +620,17 @@ namespace MBrokerBench
 
             await MetricsExporter.Finalizer();
 
-            // Console.ReadLine();
-
-            // while (true)
-            // {
-            //     System.Threading.Thread.Sleep(10000);
-            // }
-
             // Allow metrics server to be stopped gracefully
             MetricsExporter.Stop().Wait();
 
-            Logger.Log("Simulation finished.");
+            Logger.Log("Simulation finished. Press 'Q' to exit.");
+
+#if PRETTY
+            // Wait for user to read final results in PRETTY mode
+            // (The simulation loop has finished, but the UI is still running)
+#else
+            // Console.ReadLine();
+#endif
         }
     }
 }
