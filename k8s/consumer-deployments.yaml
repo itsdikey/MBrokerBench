@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mbroker-consumer-small
+  labels:
+    app: mbroker-consumer
+    profile: small
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: mbroker-consumer
+      profile: small
+  template:
+    metadata:
+      labels:
+        app: mbroker-consumer
+        profile: small
+    spec:
+      containers:
+        - name: consumer
+          image: mbroker-consumer:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KAFKA_BOOTSTRAP
+              value: "my-cluster-kafka-bootstrap:9092"
+            - name: KAFKA_TOPIC
+              value: "test-1"
+            - name: KAFKA_GROUP
+              value: "test-group"
+            - name: MAX_RATE_LIMIT
+              value: "200" # Capacity of "Small" profile
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mbroker-consumer-large
+  labels:
+    app: mbroker-consumer
+    profile: large
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: mbroker-consumer
+      profile: large
+  template:
+    metadata:
+      labels:
+        app: mbroker-consumer
+        profile: large
+    spec:
+      containers:
+        - name: consumer
+          image: mbroker-consumer:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KAFKA_BOOTSTRAP
+              value: "my-cluster-kafka-bootstrap:9092"
+            - name: KAFKA_TOPIC
+              value: "test-1"
+            - name: KAFKA_GROUP
+              value: "test-group"
+            - name: MAX_RATE_LIMIT
+              value: "800" # Capacity of "Large" profile
+          resources:
+            requests:
+              cpu: "400m"
+              memory: "512Mi"
+            limits:
+              cpu: "800m"
+              memory: "1Gi"

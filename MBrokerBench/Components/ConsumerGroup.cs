@@ -221,12 +221,34 @@ namespace MBrokerBench.Components
         private double _lastRebalanceTime;
         private double _totalTime = 0;
 
-        internal long Tick(double timeStepSeconds)
+        public void SyncRealConsumers(string profileName, int count)
+        {
+            var profile = ConsumerProfiles.FirstOrDefault(p => p.Name == profileName) ?? DefaultProfile;
+            
+            // Remove virtual consumers of this profile
+            Consumers.RemoveAll(c => c.ConsumerProfile.Name == profileName);
+
+            // Add back the correct number as 'Running'
+            for (int i = 0; i < count; i++)
+            {
+                var c = new Consumer($"RC-{profile.ShortCode}-{i}", profile);
+                c.State = ConsumerState.Running;
+                c.StartupTimeRemaining = 0;
+                Consumers.Add(c);
+            }
+            
+            MetricsExporter.SetConsumers(Consumers.Count);
+        }
+
+        internal long Tick(double timeStepSeconds, bool simulateProduction = true)
         {
             _totalTime += timeStepSeconds;
 
-            // Production
-            AllPartitions.ForEach(p => p.Produce(timeStepSeconds));
+            // Production (Skip in Real mode as DataProvider handles it)
+            if (simulateProduction)
+            {
+                AllPartitions.ForEach(p => p.Produce(timeStepSeconds));
+            }
 
             // Consumption
             long stepConsumed = 0;

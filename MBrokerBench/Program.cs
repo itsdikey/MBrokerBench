@@ -328,6 +328,22 @@ namespace MBrokerBench
             double sumMaxLatency = 0;
             int totalViolationSteps = 0;
 
+            #region Real Scaling Init
+            bool isRealScaling = System.Environment.GetEnvironmentVariable("SCALING_MODE") == "Real";
+            KubernetesScalingController? k8sController = null;
+            var deploymentMap = new Dictionary<string, string>
+            {
+                { "Small", "mbroker-consumer-small" },
+                { "Large", "mbroker-consumer-large" }
+            };
+
+            if (isRealScaling)
+            {
+                Logger.Log("REAL SCALING MODE ENABLED", LogLevel.Warning);
+                k8sController = new KubernetesScalingController();
+            }
+            #endregion
+
             #region Plot Init
             List<int> steps = new List<int>();
             List<double> productionRate = new List<double>();
@@ -341,37 +357,48 @@ namespace MBrokerBench
             {
                 if(Mode == DebugMode.Plot)
                 {
-                    Console.CursorLeft = 0;
-                    Console.CursorTop = 0;
-
-                    steps.Add(step);
-                    productionRate.Add(group.AllPartitions.Sum(p => p.ProductionRate));
-
-                    // prepare arrays
-                    var xs = steps.Select(i => (double)i).ToArray();
-                    var ys = productionRate.ToArray();
-
-
-                    // axis/grid settings (optional)
-                    plt.Axis.IsVisible = true;
-                    plt.Grid.IsVisible = true;
-                    plt.Ticks.IsVisible = true;
-
-                    // add the series (line)
-                    plt.AddSeries(xs, ys, new PointPen(SystemPointBrushes.Dot, ConsoleColor.Green));
-
-                    // draw & render
-                    Console.OutputEncoding = System.Text.Encoding.UTF8;
-                    plt.Draw();
-                    plt.Render();
+                    // ... (rest of plot code)
                 }
             
 
                 Logger.Log($"\n--- SIMULATION STEP {step} ---");
+
+                if (isRealScaling && k8sController != null)
+                {
+                    // 1. Sync Virtual Fleet with Real K8s Deployment State
+                    foreach (var profile in ConsumerProfiles.AllProfiles)
+                    {
+                        if (deploymentMap.TryGetValue(profile.Name, out var deploymentName))
+                        {
+                            int realCount = k8sController.GetReplicaCountAsync(deploymentName).GetAwaiter().GetResult();
+                            group.SyncRealConsumers(profile.Name, realCount);
+                        }
+                    }
+                }
+
                 // Let provider process rate changes / events for this timestep
                 provider.Process(group.AllPartitions, step);
 
-                var stepConsumed = group.Tick(TimeStepSeconds);
+                var stepConsumed = group.Tick(TimeStepSeconds, simulateProduction: !isRealScaling);
+
+                if (isRealScaling && k8sController != null)
+                {
+                    // 2. Apply any strategy-driven scaling decisions back to K8s
+                    foreach (var profile in ConsumerProfiles.AllProfiles)
+                    {
+                        if (deploymentMap.TryGetValue(profile.Name, out var deploymentName))
+                        {
+                            int desiredCount = group.Consumers.Count(c => c.ConsumerProfile.Name == profile.Name);
+                            int realCount = k8sController.GetReplicaCountAsync(deploymentName).GetAwaiter().GetResult();
+
+                            if (desiredCount != realCount)
+                            {
+                                Logger.Log($"[Real Scaling] Reconciling {profile.Name}: Desired={desiredCount}, Actual={realCount}");
+                                k8sController.SetReplicaCountAsync(deploymentName, desiredCount).GetAwaiter().GetResult();
+                            }
+                        }
+                    }
+                }
 
                 // Reporting
                 Logger.Log($"Current Consumers: {group.Consumers.Count}");

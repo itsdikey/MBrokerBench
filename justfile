@@ -65,6 +65,10 @@ create-topic topic partitions="6":
 	-kubectl delete pod kafka-admin --ignore-not-found=true
 	kubectl run kafka-admin -ti -q --restart='Never' --image={{STRIMZI_IMAGE}} --rm=true -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server my-cluster-kafka-bootstrap:9093 --create --topic {{topic}} --partitions {{partitions}} --replication-factor 1
 
+delete-topic topic:
+	-kubectl delete pod kafka-admin --ignore-not-found=true
+	kubectl run kafka-admin -ti -q --restart='Never' --image={{STRIMZI_IMAGE}} --rm=true -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server my-cluster-kafka-bootstrap:9093 --delete --topic {{topic}}
+
 list-topics:
 	-kubectl delete pod kafka-admin --ignore-not-found=true
 	kubectl run kafka-admin -ti -q --restart='Never' --image={{STRIMZI_IMAGE}} --rm=true -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server my-cluster-kafka-bootstrap:9093 --list
@@ -78,13 +82,39 @@ consume topic:
 	kubectl run kafka-consumer -ti --image={{STRIMZI_IMAGE}} --rm=true --restart='Never' -- /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server my-cluster-kafka-bootstrap:9093 --topic {{topic}} --from-beginning
 
 # Stress test a topic with random data to simulate production rate
-stress-topic topic messages="1000000":
+stress-topic topic messages="1000000" throughput="5000":
 	-kubectl delete pod kafka-stress --ignore-not-found=true
-	kubectl run kafka-stress -ti --image={{STRIMZI_IMAGE}} --rm=true --restart='Never' -- /opt/kafka/bin/kafka-producer-perf-test.sh --topic {{topic}} --num-records {{messages}} --record-size 100 --throughput 1000 --producer-props bootstrap.servers=my-cluster-kafka-bootstrap:9093
+	kubectl run kafka-stress -ti --image={{STRIMZI_IMAGE}} --rm=true --restart='Never' -- /opt/kafka/bin/kafka-producer-perf-test.sh --topic {{topic}} --num-records {{messages}} --record-size 100 --throughput {{throughput}} --producer-props bootstrap.servers=my-cluster-kafka-bootstrap:9093
 
 # Run Phase 1 Simulation (Real Metrics, Virtual Consumers)
 run-kafka-sim:
 	$env:DATA_PROVIDER="Kafka"; \
+	$env:KAFKA_BOOTSTRAP="localhost:9092"; \
+	$env:PROMETHEUS_URL="http://localhost:9090"; \
+	$env:KAFKA_TOPIC="test-1"; \
+	$env:KAFKA_GROUP="test-group"; \
+	dotnet run --project MBrokerBench/MBrokerBench.csproj
+
+# Phase 2: Real Infrastructure Transition
+
+# Build the Consumer Agent Image
+build-consumer:
+	docker build -t mbroker-consumer:latest -f MBrokerConsumer/Dockerfile .
+
+# Load the image into k3d
+load-consumer:
+	k3d image import mbroker-consumer:latest -c mbroker-dev
+
+# Deploy Real Infrastructure (Consumers + RBAC)
+deploy-infra:
+	kubectl apply -f k8s/controller-rbac.yaml
+	kubectl apply -f k8s/consumer-deployments.yaml
+
+# Run Phase 2 Controller (Real Scaling Mode)
+# This requires port-forwarding for Kafka and K8s context to be set correctly
+run-phase2:
+	$env:DATA_PROVIDER="Kafka"; \
+	$env:SCALING_MODE="Real"; \
 	$env:KAFKA_BOOTSTRAP="localhost:9092"; \
 	$env:PROMETHEUS_URL="http://localhost:9090"; \
 	$env:KAFKA_TOPIC="test-1"; \

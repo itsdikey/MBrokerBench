@@ -5,7 +5,7 @@
     public class Partition : IPartition
     {
         public string Id { get; }
-        public long CurrentLag { get; private set; } // Messages or bytes pending consumption
+        public long CurrentLag { get; internal set; } // Messages or bytes pending consumption
         public double ProductionRate { get; set; } // Messages(or bytes)/sec
 
         // Consumer currently assigned to this partition.

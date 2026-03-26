@@ -1,4 +1,5 @@
 using Confluent.Kafka;
+using Confluent.Kafka.Admin;
 using MBrokerBench.Components;
 using System.Text.Json;
 
@@ -18,6 +19,8 @@ namespace MBrokerBench.DataProviders
         private readonly Dictionary<int, long> _previousOffsets = new();
         private DateTime _lastUpdateTime = DateTime.MinValue;
 
+        private readonly IAdminClient _adminClient;
+
         public KafkaDataProvider(string bootstrapServers, string prometheusUrl, string topic, string consumerGroup)
         {
             _bootstrapServers = bootstrapServers;
@@ -33,16 +36,16 @@ namespace MBrokerBench.DataProviders
                 EnableAutoCommit = false
             };
             _pollConsumer = new ConsumerBuilder<Ignore, Ignore>(config).Build();
+
+            var adminConfig = new AdminClientConfig { BootstrapServers = _bootstrapServers };
+            _adminClient = new AdminClientBuilder(adminConfig).Build();
         }
 
         public List<Components.Partition> InitializePartitions()
         {
-            var config = new AdminClientConfig { BootstrapServers = _bootstrapServers };
-            using var adminClient = new AdminClientBuilder(config).Build();
-            
             try
             {
-                var metadata = adminClient.GetMetadata(_topic, TimeSpan.FromSeconds(10));
+                var metadata = _adminClient.GetMetadata(_topic, TimeSpan.FromSeconds(10));
                 var topicMetadata = metadata.Topics.FirstOrDefault(t => t.Topic == _topic);
 
                 if (topicMetadata == null)
@@ -83,28 +86,50 @@ namespace MBrokerBench.DataProviders
 
             _lastUpdateTime = now;
 
-            foreach (var partition in partitions)
+            try
             {
-                int partitionId = int.Parse(partition.Id);
+                // Fetch all committed offsets for the target group in one go
+                var groupOffsets = _adminClient.ListConsumerGroupOffsetsAsync(new List<ConsumerGroupTopicPartitions> 
+                { 
+                    new ConsumerGroupTopicPartitions(_consumerGroup, null) 
+                }).Result;
 
-                try 
+                var offsetMap = groupOffsets.First().Partitions.ToDictionary(p => p.Partition.Value, p => p.Offset.Value);
+
+                foreach (var partition in partitions)
                 {
-                    // Query Kafka directly for the Log End Offset (High Watermark)
-                    var topicPartition = new TopicPartition(_topic, new Confluent.Kafka.Partition(partitionId));
-                    var watermark = _pollConsumer.QueryWatermarkOffsets(topicPartition, TimeSpan.FromSeconds(2));
-                    long currentRealOffset = watermark.High.Value;
+                    int partitionId = int.Parse(partition.Id);
 
-                    if (_previousOffsets.TryGetValue(partitionId, out long lastRealOffset))
+                    try 
                     {
-                        // The rate is (current - last) over the interval (which is ~1s)
-                        partition.ProductionRate = Math.Max(0, currentRealOffset - lastRealOffset);
+                        // Query Kafka directly for the Log End Offset (High Watermark)
+                        var topicPartition = new TopicPartition(_topic, new Confluent.Kafka.Partition(partitionId));
+                        var watermark = _pollConsumer.QueryWatermarkOffsets(topicPartition, TimeSpan.FromSeconds(2));
+                        long currentRealOffset = watermark.High.Value;
+
+                        // Get committed offset from our target group
+                        if (offsetMap.TryGetValue(partitionId, out long committedOffset))
+                        {
+                            if (committedOffset < 0) committedOffset = 0;
+                            partition.CurrentLag = Math.Max(0, currentRealOffset - committedOffset);
+                        }
+
+                        if (_previousOffsets.TryGetValue(partitionId, out long lastRealOffset))
+                        {
+                            // The rate is (current - last) over the interval (which is ~1s)
+                            partition.ProductionRate = Math.Max(0, currentRealOffset - lastRealOffset);
+                        }
+                        _previousOffsets[partitionId] = currentRealOffset;
                     }
-                    _previousOffsets[partitionId] = currentRealOffset;
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[Kafka] Error polling partition {partitionId}: {ex.Message}");
+                    }
                 }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[Kafka] Error polling partition {partitionId}: {ex.Message}");
-                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Kafka] Error fetching group offsets: {ex.Message}");
             }
 
             return partitions;
@@ -114,6 +139,7 @@ namespace MBrokerBench.DataProviders
         {
             _pollConsumer.Close();
             _pollConsumer.Dispose();
+            _adminClient.Dispose();
             _httpClient.Dispose();
         }
     }
