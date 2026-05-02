@@ -1,3 +1,79 @@
+---
+# ServiceAccount for MBrokerBench controller
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mbrokerbench-controller
+  labels:
+    app: mbrokerbench
+
+---
+# Role for managing consumer deployments and monitoring pods
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mbrokerbench-role
+  labels:
+    app: mbrokerbench
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+
+---
+# Bind the ServiceAccount to the Role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mbrokerbench-rolebinding
+  labels:
+    app: mbrokerbench
+subjects:
+  - kind: ServiceAccount
+    name: mbrokerbench-controller
+roleRef:
+  kind: Role
+  name: mbrokerbench-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ConfigMap for simulation configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mbroker-sim-config
+  labels:
+    app: mbrokerbench
+data:
+  simulation_config.json: |
+    {
+      "name": "DevMark",
+      "description": "Developer benchmark config for Phase 2 real-infra mode",
+      "partitions": [
+        {"id": 0, "initialRate": 800},
+        {"id": 1, "initialRate": 800},
+        {"id": 2, "initialRate": 800},
+        {"id": 3, "initialRate": 800},
+        {"id": 4, "initialRate": 800},
+        {"id": 5, "initialRate": 800}
+      ],
+      "events": [
+        {"step": 300, "action": "change_rate", "partition": "all", "rate": 2500},
+        {"step": 600, "action": "change_rate", "partition": "all", "rate": 1200},
+        {"step": 900, "action": "change_rate", "partition": "all", "rate": 4000}
+      ],
+      "rateVariability": 0.2,
+      "refreshIntervalMs": 1000
+    }
+
+---
+# MBrokerBench Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,24 +90,35 @@ spec:
       labels:
         app: mbrokerbench
     spec:
+      serviceAccountName: mbrokerbench-controller
       containers:
         - name: mbrokerbench
-          image: "<REGISTRY>/mbrokerbench:latest" # replace with your image
+          image: "<REGISTRY>/mbrokerbench:latest"  # replace with your image
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 1234
               name: metrics
           env:
             - name: STRATEGY
-              value: "ModifiedWorstFitAssignment"
+              value: "CostCentricModifiedWorstFitAssignment"
             - name: RUN_ID
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
             - name: KAFKA_BOOTSTRAP_SERVERS
-              value: "kafka:9092" # set to your Kafka bootstrap servers
+              value: "my-cluster-kafka-bootstrap:9093"
             - name: KAFKA_TOPIC
               value: "my-topic"
+            - name: KAFKA_GROUP
+              value: "mbrokerbench-group"
+            - name: DATA_PROVIDER
+              value: "Kafka"
+            - name: PROMETHEUS_URL
+              value: "http://prometheus-server:80"
+            - name: PUSHGATEWAY_URL
+              value: "http://pushgateway:9091"
+            - name: KUBERNETES_SCALING_ENABLED
+              value: "true"
           volumeMounts:
             - name: sim-config
               mountPath: /app/simulation_config.json

@@ -95,6 +95,44 @@ run-kafka-sim:
 	$env:KAFKA_GROUP="test-group"; \
 	dotnet run --project MBrokerBench/MBrokerBench.csproj
 
+# ============================================================
+# Phase 2: Real Infrastructure Deployments
+# ============================================================
+# Deploy MBrokerBench Controller with RBAC (ServiceAccount, Role, RoleBinding)
+deploy-controller:
+	@echo "Deploying MBrokerBench Controller with RBAC..."
+	kubectl apply -f k8s/mbroker-deployment.yaml
+	@echo "Waiting for controller to be ready..."
+	kubectl rollout status deployment/mbrokerbench --timeout=120s
+
+# Deploy consumer Deployments (small + large, scaled to 0 by default)
+deploy-consumers:
+	@echo "Deploying consumer ConfigMap..."
+	kubectl apply -f k8s/mbroker-consumer-config.yaml
+	@echo "Deploying consumer Deployments (small + large)..."
+	kubectl apply -f k8s/mbroker-consumer-small.yaml
+	kubectl apply -f k8s/mbroker-consumer-large.yaml
+
+# Full Phase 2 stack deploy (run after Phase 0 is up)
+phase2-up: deploy-controller deploy-consumers
+	@echo "Phase 2 stack deployed. Consumers start at 0 replicas."
+	@echo "MBrokerBench will scale them up/down based on Kafka lag."
+
+# Deploy all Phase 0 + Phase 2 infrastructure
+full-up: up deploy-controller deploy-consumers
+
+# Scale all consumer Deployments to 0
+scale-down-consumers:
+	kubectl scale deployment/mbroker-consumer-small --replicas=0
+	kubectl scale deployment/mbroker-consumer-large --replicas=0
+
+# Watch consumer pod status
+watch-consumers:
+	kubectl get pods -l app=mbroker-consumer -w
+
+# Watch controller logs
+logs-controller:
+	kubectl logs -l app=mbrokerbench --tail=100 -f
 # Phase 2: Real Infrastructure Transition
 
 # Build the Consumer Agent Image

@@ -1,0 +1,34 @@
+---
+# Shared configuration for consumer agent pods
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mbroker-consumer-config
+  labels:
+    app: mbroker-consumer
+data:
+  # Default settings shared across all consumer profiles
+  consumer.yaml: |
+    consumer:
+      commit_interval_ms: 5000
+      batch_size: 100
+      poll_timeout_ms: 1000
+      session_timeout_ms: 30000
+      heartbeat_interval_ms: 3000
+      enable_auto_commit: false
+      auto_offset_reset: latest
+
+    # Graceful shutdown: max time to wait for in-flight work before force-kill
+    shutdown:
+      drain_timeout_seconds: 25
+      commit_on_exit: true
+
+    # Metrics exposure
+    metrics:
+      port: 9091
+      path: /metrics
+
+    # Self-preservation: backpressure threshold to avoid OOM
+    backpressure:
+      max_pending_messages: 10000
+      max_pending_bytes: 104857600  # 100 MB

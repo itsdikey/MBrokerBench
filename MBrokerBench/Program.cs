@@ -237,7 +237,7 @@ namespace MBrokerBench
                 string dataProviderEnv = System.Environment.GetEnvironmentVariable("DATA_PROVIDER") ?? "Poisson";
                 IDataProvider baseProvider = dataProviderEnv switch
                 {
-                    "Poisson" => new PoissonDataProvider(PoissonDataProvider.ScenarioSkewed9),
+                    "Poisson" => new PoissonDataProvider(PoissonDataProvider.ScenarioUniform),
                     "Sinusoid" => new SinusoidDataProvider(SinusoidDataProvider.ScenarioUniform),
                     "Kafka" => new KafkaDataProvider(
                         System.Environment.GetEnvironmentVariable("KAFKA_BOOTSTRAP") ?? "localhost:9092",
