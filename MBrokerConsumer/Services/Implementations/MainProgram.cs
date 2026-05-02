@@ -31,6 +31,8 @@ internal sealed class MainProgram : IMainProgram
 
         LogConfig(_envConfig);
 
+        var loggingWindowLimiter = new LoggingWindowLimter(TimeSpan.FromMilliseconds(1000));
+
         var config = _envConfig.ToConsumerConfig();
 
         using var consumer = new ConsumerBuilder<Ignore, byte[]>(config)
@@ -48,9 +50,11 @@ internal sealed class MainProgram : IMainProgram
 
         _logger.LogInformation("Consumption loop started.");
 
-        var windowStopwatch = Stopwatch.StartNew();
-        long windowCount = 0;
-        long totalMessages = 0;
+
+        var consumptionCounter = new ConsumptionCounter();
+        var commitStopwatch = Stopwatch.StartNew();
+        var lastLagLogTotal = 0L;
+        var lastLagLogTime = DateTime.UtcNow;
 
         try
         {
@@ -64,17 +68,58 @@ internal sealed class MainProgram : IMainProgram
 
                     if (consumeResult != null)
                     {
-                        windowCount++;
-                        totalMessages++;
+                        consumptionCounter.Increment();
 
-                        // Log rate every second
-                        if (windowStopwatch.Elapsed.TotalSeconds >= 1.0)
+                        if (loggingWindowLimiter.ShouldLog(out var timePassed))
                         {
                             _logger.LogInformation(
                                 "Consumed {Count} msgs in {Elapsed:F2}s. Total: {Total}",
-                                windowCount, windowStopwatch.Elapsed.TotalSeconds, totalMessages);
-                            windowCount = 0;
-                            windowStopwatch.Restart();
+                                consumptionCounter.CurrentWindowCount, timePassed.TotalSeconds, consumptionCounter.TotalCount);
+                            consumptionCounter.ResetWindow();
+                        }
+
+                        // Commit offsets periodically
+                        if (commitStopwatch.Elapsed.TotalSeconds >= _envConfig.CommitIntervalSeconds)
+                        {
+                            try
+                            {
+                                consumer.Commit();
+                                _logger.LogDebug("Committed offsets after {Elapsed:F1}s", commitStopwatch.Elapsed.TotalSeconds);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning("Commit failed: {Message}", ex.Message);
+                            }
+                            commitStopwatch.Restart();
+                        }
+
+                        // Log rate + estimated lag every 10s
+                        if ((DateTime.UtcNow - lastLagLogTime).TotalSeconds >= 10)
+                        {
+                            var elapsed = (DateTime.UtcNow - lastLagLogTime).TotalSeconds;
+                            var rate = (consumptionCounter.TotalCount - lastLagLogTotal) / elapsed;
+
+                            long totalLag = 0;
+                            foreach (var tp in consumer.Assignment)
+                            {
+                                try
+                                {
+                                    var watermarks = consumer.QueryWatermarkOffsets(tp, TimeSpan.FromSeconds(2));
+                                    var position = consumer.Position(tp);
+                                    totalLag += Math.Max(0, watermarks.High.Value - position.Value);
+                                }
+                                catch
+                                {
+                                    // skip partitions where lag can't be computed yet
+                                }
+                            }
+
+                            _logger.LogInformation(
+                                "Consumer rate: {Rate:F0} msgs/s, estimated lag: {Lag:N0}",
+                                rate, totalLag);
+
+                            lastLagLogTotal = consumptionCounter.TotalCount;
+                            lastLagLogTime = DateTime.UtcNow;
                         }
                     }
                 }
@@ -90,11 +135,22 @@ internal sealed class MainProgram : IMainProgram
         }
         finally
         {
-            if (windowCount > 0)
+            // Final commit before shutdown
+            try
+            {
+                consumer.Commit();
+                _logger.LogInformation("Final commit completed");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Final commit failed: {Message}", ex.Message);
+            }
+
+            if (consumptionCounter.CurrentWindowCount > 0)
             {
                 _logger.LogInformation(
                     "Final batch: {Count} msgs in {Elapsed:F2}s. Total: {Total}",
-                    windowCount, windowStopwatch.Elapsed.TotalSeconds, totalMessages);
+                    consumptionCounter.CurrentWindowCount, loggingWindowLimiter.LastTime.TotalSeconds, consumptionCounter.TotalCount);
             }
             consumer.Close();
         }

@@ -1,3 +1,4 @@
+using Confluent.Kafka;
 using MBrokerConsumer.Models;
 using Microsoft.Extensions.Logging;
 using MSLogLevel = Microsoft.Extensions.Logging.LogLevel;
@@ -104,6 +105,22 @@ public class ConsumerEnvConfigGetLogLevelTests
 
 public class ConsumerEnvConfigToConsumerConfigTests
 {
+    [Fact]
+    public void ToConsumerConfig_ShouldSetAutoOffsetResetToLatest()
+    {
+        var config = new ConsumerEnvConfig();
+        var kafkaConfig = config.ToConsumerConfig();
+        Assert.Equal(AutoOffsetReset.Latest, kafkaConfig.AutoOffsetReset);
+    }
+
+    [Fact]
+    public void ToConsumerConfig_ShouldDisableAutoCommit()
+    {
+        var config = new ConsumerEnvConfig();
+        var kafkaConfig = config.ToConsumerConfig();
+        Assert.False(kafkaConfig.EnableAutoCommit);
+    }
+
     [Fact]
     public void ToConsumerConfig_ShouldMapBootstrapServers()
     {

@@ -21,8 +21,8 @@ namespace MBrokerConsumer.Models
             {
                 BootstrapServers = BootstrapServers,
                 GroupId = GroupId,
-                AutoOffsetReset = AutoOffsetReset.Earliest,
-                EnableAutoCommit = true,
+                AutoOffsetReset = AutoOffsetReset.Latest,
+                EnableAutoCommit = false,
                 FetchWaitMaxMs = 100 // Reduce latency for rate limiting
             };
         }
