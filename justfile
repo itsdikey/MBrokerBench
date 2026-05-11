@@ -159,6 +159,10 @@ run-phase2:
 	$env:KAFKA_GROUP="test-group"; \
 	dotnet run --project MBrokerBench/MBrokerBench.csproj
 
+# Run Phase 2 E2E automated test harness (C#)
+phase2-test *args:
+	dotnet run --project MBrokerBench.Phase2Tests/MBrokerBench.Phase2Tests.csproj -- {{args}}
+
 # Utility to clean stuck pods
 clean-pods:
 	kubectl delete pod kafka-admin kafka-producer kafka-consumer kafka-stress --ignore-not-found=true

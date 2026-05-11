@@ -1,7 +1,7 @@
 ﻿using Confluent.Kafka;
 using MBrokerConsumer.Models;
 using Microsoft.Extensions.Logging;
-using System.Diagnostics;
+using System.Threading;
 
 namespace MBrokerConsumer.Services.Implementations;
 
@@ -10,15 +10,45 @@ internal sealed class MainProgram : IMainProgram
     private readonly ILogger<Program> _logger;
     private readonly ConsumerEnvConfig _envConfig;
     private readonly TokenBucketLimiter _rateLimiter;
+    private readonly IHealthProbeService _healthProbe;
+    private readonly ICommitTracker _commitTracker;
+    private readonly IRateLogger _rateLogger;
 
+    private readonly CancellationTokenSource _cancellationToken = new();
+    private readonly ManualResetEventSlim _drainComplete = new(false);
     public MainProgram(
         ILogger<Program> logger,
         ConsumerEnvConfig envConfig,
-        TokenBucketLimiter rateLimiter)
+        TokenBucketLimiter rateLimiter,
+        ITerminationService terminationService,
+        IHealthProbeService healthProbe,
+        ICommitTracker commitTracker,
+        IRateLogger rateLogger
+        )
     {
         _logger = logger;
         _envConfig = envConfig;
         _rateLimiter = rateLimiter;
+        _healthProbe = healthProbe;
+        _commitTracker = commitTracker;
+        _rateLogger = rateLogger;
+        terminationService.TerminationRequested += () =>
+        {
+            _logger.LogInformation("Termination requested. Initiating shutdown...");
+            OnTerminate();
+        };
+    }
+
+    private void OnTerminate()
+    {
+        _cancellationToken.Cancel();
+        _logger.LogInformation("Draining in-flight messages for up to {Seconds}s...", _envConfig.DrainTimeoutSeconds);
+
+        if (!_drainComplete.Wait(TimeSpan.FromSeconds(_envConfig.DrainTimeoutSeconds)))
+        {
+            _logger.LogWarning("Drain timeout exceeded ({Seconds}s). Forcing exit.", _envConfig.DrainTimeoutSeconds);
+            Environment.Exit(1);
+        }
     }
 
     public async Task Run()
@@ -41,33 +71,25 @@ internal sealed class MainProgram : IMainProgram
 
         consumer.Subscribe(_envConfig.Topic);
 
-        var cts = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, e) =>
-        {
-            e.Cancel = true;
-            cts.Cancel();
-        };
-
         _logger.LogInformation("Consumption loop started.");
 
 
         var consumptionCounter = new ConsumptionCounter();
-        var commitStopwatch = Stopwatch.StartNew();
-        var lastLagLogTotal = 0L;
-        var lastLagLogTime = DateTime.UtcNow;
 
         try
         {
-            while (!cts.IsCancellationRequested)
+            while (!_cancellationToken.IsCancellationRequested)
             {
                 try
-                {
-                    await _rateLimiter.ConsumeAsync();
+            {
+                await _rateLimiter.ConsumeAsync();
 
                     var consumeResult = consumer.Consume(TimeSpan.FromMilliseconds(100));
 
                     if (consumeResult != null)
                     {
+                        _healthProbe.MarkReady();
+                        _healthProbe.ReportMessageReceived();
                         consumptionCounter.Increment();
 
                         if (loggingWindowLimiter.ShouldLog(out var timePassed))
@@ -78,49 +100,26 @@ internal sealed class MainProgram : IMainProgram
                             consumptionCounter.ResetWindow();
                         }
 
-                        // Commit offsets periodically
-                        if (commitStopwatch.Elapsed.TotalSeconds >= _envConfig.CommitIntervalSeconds)
+                        _commitTracker.TryCommit(() => consumer.Commit());
+                        _rateLogger.MessageConsumed();
+
+                        // Log rate + estimated lag every 10s
+                        long totalLag = 0;
+                        foreach (var tp in consumer.Assignment)
                         {
                             try
                             {
-                                consumer.Commit();
-                                _logger.LogDebug("Committed offsets after {Elapsed:F1}s", commitStopwatch.Elapsed.TotalSeconds);
+                                var watermarks = consumer.QueryWatermarkOffsets(tp, TimeSpan.FromSeconds(2));
+                                var position = consumer.Position(tp);
+                                totalLag += Math.Max(0, watermarks.High.Value - position.Value);
                             }
-                            catch (Exception ex)
+                            catch
                             {
-                                _logger.LogWarning("Commit failed: {Message}", ex.Message);
+                                // skip partitions where lag can't be computed yet
                             }
-                            commitStopwatch.Restart();
                         }
 
-                        // Log rate + estimated lag every 10s
-                        if ((DateTime.UtcNow - lastLagLogTime).TotalSeconds >= 10)
-                        {
-                            var elapsed = (DateTime.UtcNow - lastLagLogTime).TotalSeconds;
-                            var rate = (consumptionCounter.TotalCount - lastLagLogTotal) / elapsed;
-
-                            long totalLag = 0;
-                            foreach (var tp in consumer.Assignment)
-                            {
-                                try
-                                {
-                                    var watermarks = consumer.QueryWatermarkOffsets(tp, TimeSpan.FromSeconds(2));
-                                    var position = consumer.Position(tp);
-                                    totalLag += Math.Max(0, watermarks.High.Value - position.Value);
-                                }
-                                catch
-                                {
-                                    // skip partitions where lag can't be computed yet
-                                }
-                            }
-
-                            _logger.LogInformation(
-                                "Consumer rate: {Rate:F0} msgs/s, estimated lag: {Lag:N0}",
-                                rate, totalLag);
-
-                            lastLagLogTotal = consumptionCounter.TotalCount;
-                            lastLagLogTime = DateTime.UtcNow;
-                        }
+                        _rateLogger.TryLogRateAndLag(totalLag);
                     }
                 }
                 catch (ConsumeException e)
@@ -135,16 +134,7 @@ internal sealed class MainProgram : IMainProgram
         }
         finally
         {
-            // Final commit before shutdown
-            try
-            {
-                consumer.Commit();
-                _logger.LogInformation("Final commit completed");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning("Final commit failed: {Message}", ex.Message);
-            }
+            _commitTracker.ForceCommit(() => consumer.Commit());
 
             if (consumptionCounter.CurrentWindowCount > 0)
             {
@@ -152,7 +142,15 @@ internal sealed class MainProgram : IMainProgram
                     "Final batch: {Count} msgs in {Elapsed:F2}s. Total: {Total}",
                     consumptionCounter.CurrentWindowCount, loggingWindowLimiter.LastTime.TotalSeconds, consumptionCounter.TotalCount);
             }
+
+            _logger.LogInformation(
+                "Shutdown complete — committed offsets, {Total} messages processed",
+                consumptionCounter.TotalCount);
+
+            _healthProbe.Stop();
+
             consumer.Close();
+            _drainComplete.Set();
         }
     }
 
@@ -196,4 +194,3 @@ internal sealed class MainProgram : IMainProgram
         return true;
     }
 }
- 

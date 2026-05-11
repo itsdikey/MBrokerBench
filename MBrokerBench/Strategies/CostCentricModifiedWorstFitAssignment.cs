@@ -191,7 +191,9 @@ namespace MBrokerBench.Strategies
             // This prevents "Rebalance Storms" where lag from one rebalance triggers another.
             double lagComponent = totalLag > (totalProduction * 2) ? (totalLag / SLA) : 0;
             double targetDemand = totalProduction + lagComponent;
-            
+
+            Logger.Log($"[AUTOSCALE-DEBUG] totalLag={totalLag:F0} totalProd={totalProduction:F0} lagComp={lagComponent:F0} targetDemand={targetDemand:F0} consumers={consumers.Count} profiles={string.Join(",", consumers.GroupBy(c=>c.ConsumerProfile.ShortCode).Select(g=>$"{g.Key}={g.Count()}"))}");
+
             // 2. FLEET PLANNING
             CheckAndProvisionCapacity(targetDemand, allowRemovals: !anyoneBooting);
 
@@ -252,13 +254,18 @@ namespace MBrokerBench.Strategies
 
             // 3. SCALE UP / DEFICIT (Dampened)
             // We only add up to 2 consumers per tick to prevent "Explosive Scaling".
+            // IMPORTANT: Order profiles by capacity DESCENDING (largest first) so that Large
+            // gets its allocation before the 2/tick budget is consumed by Small/Medium.
             int additionsThisTick = 0;
-            foreach (var profileName in targetCounts.Keys)
+            int maxAdditions = Math.Min(2, Math.Max(0, partitions.Count - consumers.Count));
+            foreach (var kvp in targetCounts.OrderByDescending(kv => ConsumerGroup.ConsumerProfiles
+                .FirstOrDefault(p => p.Name == kv.Key)?.MaxCapacity ?? 0))
             {
-                int targetCount = targetCounts[profileName];
+                string profileName = kvp.Key;
+                int targetCount = kvp.Value;
                 int currentCount = consumers.Count(c => c.ConsumerProfile.Name == profileName);
 
-                while (currentCount < targetCount && consumers.Count < partitions.Count && additionsThisTick < 2)
+                while (currentCount < targetCount && additionsThisTick < maxAdditions)
                 {
                     Logger.Log($"[AUTOSCALE] Capacity Deficit: Provisioning {profileName}.");
                     ConsumerGroup.AddConsumer(profileName);
@@ -268,10 +275,11 @@ namespace MBrokerBench.Strategies
             }
 
             // 4. EMERGENCY CHECK: Unassigned partitions
-            if (additionsThisTick < 2 && partitions.Any(p => p.AssignedConsumer == null))
+            if (additionsThisTick < maxAdditions && partitions.Any(p => p.AssignedConsumer == null))
             {
                 Logger.Log($"[AUTOSCALE] Emergency: Provisioning {ConsumerGroup.DefaultProfile.Name} for unassigned partitions.");
                 ConsumerGroup.AddConsumer();
+                additionsThisTick++;
             }
         }
 

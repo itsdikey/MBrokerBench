@@ -17,26 +17,49 @@ spec:
         app: mbroker-consumer
         profile: small
     spec:
+      terminationGracePeriodSeconds: 30
       containers:
         - name: consumer
           image: mbroker-consumer:latest
           imagePullPolicy: IfNotPresent
           env:
-            - name: KAFKA_BOOTSTRAP
-              value: "my-cluster-kafka-bootstrap:9092"
-            - name: KAFKA_TOPIC
+            - name: BOOTSTRAP_SERVERS
+              value: "my-cluster-kafka-bootstrap:9093"
+            - name: TOPIC
               value: "test-1"
-            - name: KAFKA_GROUP
+            - name: GROUP_ID
               value: "test-group"
             - name: MAX_RATE_LIMIT
-              value: "200" # Capacity of "Small" profile
+              value: "500"
+            - name: CONSUMER_PROFILE
+              value: "small"
+            - name: LOG_LEVEL
+              value: "Information"
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "200m"
+              cpu: "250m"
               memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - test -f /tmp/consumer-ready
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - test -f /tmp/consumer-healthy
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 3
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -57,23 +80,46 @@ spec:
         app: mbroker-consumer
         profile: large
     spec:
+      terminationGracePeriodSeconds: 30
       containers:
         - name: consumer
           image: mbroker-consumer:latest
           imagePullPolicy: IfNotPresent
           env:
-            - name: KAFKA_BOOTSTRAP
-              value: "my-cluster-kafka-bootstrap:9092"
-            - name: KAFKA_TOPIC
+            - name: BOOTSTRAP_SERVERS
+              value: "my-cluster-kafka-bootstrap:9093"
+            - name: TOPIC
               value: "test-1"
-            - name: KAFKA_GROUP
+            - name: GROUP_ID
               value: "test-group"
             - name: MAX_RATE_LIMIT
-              value: "800" # Capacity of "Large" profile
+              value: "2500"
+            - name: CONSUMER_PROFILE
+              value: "large"
+            - name: LOG_LEVEL
+              value: "Information"
           resources:
             requests:
-              cpu: "400m"
-              memory: "512Mi"
-            limits:
-              cpu: "800m"
+              cpu: "1000m"
               memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - test -f /tmp/consumer-ready
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - test -f /tmp/consumer-healthy
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 3

@@ -59,6 +59,7 @@ namespace MBrokerBench
     public class BrokerSimulator
     {
         private const double TimeStepSeconds = 1;
+        private static bool _headless;
 
         public enum DebugMode
         {
@@ -81,93 +82,101 @@ namespace MBrokerBench
 
         public static async Task Main()
         {
+            // Headless mode: skip Terminal.Gui TUI, use console logging
+            _headless = Environment.GetEnvironmentVariable("NO_TUI") == "true";
+            bool headless = _headless;
+
+            if (!headless)
+            {
 #if PRETTY
-            Application.Init();
-            var top = Application.Top;
+                Application.Init();
+                var top = Application.Top;
 
-            var win = new Window("MBrokerBench - Kafka Autoscaling Simulation")
-            {
-                X = 0,
-                Y = 0,
-                Width = Dim.Fill(),
-                Height = Dim.Fill()
-            };
-
-            _statusWin = new Window("Status")
-            {
-                X = 0,
-                Y = 0,
-                Width = Dim.Percent(30),
-                Height = 10
-            };
-            _statusLabel = new Label("Initializing...") { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
-            _statusWin.Add(_statusLabel);
-
-            _partitionWin = new Window("Partitions")
-            {
-                X = Pos.Right(_statusWin),
-                Y = 0,
-                Width = Dim.Percent(40),
-                Height = 10
-            };
-            _partitionListView = new ListView(new List<string>()) { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
-            _partitionWin.Add(_partitionListView);
-
-            _consumerWin = new Window("Consumers")
-            {
-                X = Pos.Right(_partitionWin),
-                Y = 0,
-                Width = Dim.Fill(),
-                Height = 10
-            };
-            _consumerListView = new ListView(new List<string>()) { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
-            _consumerWin.Add(_consumerListView);
-
-            _logWin = new Window("Logs")
-            {
-                X = 0,
-                Y = 10,
-                Width = Dim.Fill(),
-                Height = Dim.Fill()
-            };
-            _logListView = new ListView(Logger.Logs) { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
-            _logWin.Add(_logListView);
-
-            win.Add(_statusWin, _partitionWin, _consumerWin, _logWin);
-            top.Add(win);
-
-            top.KeyPress += (e) =>
-            {
-                if (e.KeyEvent.Key == Key.Q || e.KeyEvent.Key == (Key)'q')
+                var win = new Window("MBrokerBench - Kafka Autoscaling Simulation")
                 {
-                    Application.RequestStop();
-                }
-            };
+                    X = 0,
+                    Y = 0,
+                    Width = Dim.Fill(),
+                    Height = Dim.Fill()
+                };
 
-            Logger.OnLog = (msg) =>
-            {
-                Application.MainLoop.Invoke(() =>
+                _statusWin = new Window("Status")
                 {
-                    try
-                    {
-                        //_logListView.SetSource(Logger.Logs.ToList());
-                        //_logListView.SelectedItem = Logger.Logs.Count - 1;
-                        //_logListView.TopItem = Math.Max(0, Logger.Logs.Count - 1);
-                    }
-                    catch
-                    {
-                        // Ignore if logs are empty or index out of range
-                    }
-                });
-            };
+                    X = 0,
+                    Y = 0,
+                    Width = Dim.Percent(30),
+                    Height = 10
+                };
+                _statusLabel = new Label("Initializing...") { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+                _statusWin.Add(_statusLabel);
 
-            var simTask = Task.Run(async () => await RunSimulation());
-            
-            Application.Run();
-            return;
-#else
-            await RunSimulation();
+                _partitionWin = new Window("Partitions")
+                {
+                    X = Pos.Right(_statusWin),
+                    Y = 0,
+                    Width = Dim.Percent(40),
+                    Height = 10
+                };
+                _partitionListView = new ListView(new List<string>()) { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+                _partitionWin.Add(_partitionListView);
+
+                _consumerWin = new Window("Consumers")
+                {
+                    X = Pos.Right(_partitionWin),
+                    Y = 0,
+                    Width = Dim.Fill(),
+                    Height = 10
+                };
+                _consumerListView = new ListView(new List<string>()) { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+                _consumerWin.Add(_consumerListView);
+
+                _logWin = new Window("Logs")
+                {
+                    X = 0,
+                    Y = 10,
+                    Width = Dim.Fill(),
+                    Height = Dim.Fill()
+                };
+                _logListView = new ListView(Logger.Logs) { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+                _logWin.Add(_logListView);
+
+                win.Add(_statusWin, _partitionWin, _consumerWin, _logWin);
+                top.Add(win);
+
+                top.KeyPress += (e) =>
+                {
+                    if (e.KeyEvent.Key == Key.Q || e.KeyEvent.Key == (Key)'q')
+                    {
+                        Application.RequestStop();
+                    }
+                };
+
+                Logger.OnLog = (msg) =>
+                {
+                    Application.MainLoop.Invoke(() =>
+                    {
+                        try
+                        {
+                            //_logListView.SetSource(Logger.Logs.ToList());
+                            //_logListView.SelectedItem = Logger.Logs.Count - 1;
+                            //_logListView.TopItem = Math.Max(0, Logger.Logs.Count - 1);
+                        }
+                        catch
+                        {
+                            // Ignore if logs are empty or index out of range
+                        }
+                    });
+                };
+
+                var simTask = Task.Run(async () => await RunSimulation());
+
+                Application.Run();
+                return;
 #endif
+            }
+            // Fall through to headless mode (no TUI) — works in background
+            Logger.OnLog = (msg) => Console.WriteLine(msg);
+            await RunSimulation();
         }
 
         private static async Task RunSimulation()
@@ -341,6 +350,16 @@ namespace MBrokerBench
             {
                 Logger.Log("REAL SCALING MODE ENABLED", LogLevel.Warning);
                 k8sController = new KubernetesScalingController();
+                
+                // Initial sync: read actual K8s deployment state (not our local tracking)
+                foreach (var profile in ConsumerProfiles.AllProfiles)
+                {
+                    if (deploymentMap.TryGetValue(profile.Name, out var deploymentName))
+                    {
+                        int realCount = k8sController.GetKubernetesReplicaCountAsync(deploymentName).GetAwaiter().GetResult();
+                        Logger.Log($"[Real Scaling] Initial {profile.Name} replica count: {realCount}");
+                    }
+                }
             }
             #endregion
 
@@ -365,15 +384,22 @@ namespace MBrokerBench
 
                 if (isRealScaling && k8sController != null)
                 {
-                    // 1. Sync Virtual Fleet with Real K8s Deployment State
+                    // 1. Sync Virtual Fleet with locally-tracked K8s Deployment State.
+                    //    Uses GetLastAppliedCount (not K8s API) to avoid reading back our own
+                    //    patches from the previous tick. K8s pods take 10-30s to start, but
+                    //    Spec.Replicas returns instantly — re-reading would cause oscillation.
                     foreach (var profile in ConsumerProfiles.AllProfiles)
                     {
                         if (deploymentMap.TryGetValue(profile.Name, out var deploymentName))
                         {
-                            int realCount = k8sController.GetReplicaCountAsync(deploymentName).GetAwaiter().GetResult();
+                            int realCount = k8sController.GetLastAppliedCount(deploymentName);
                             group.SyncRealConsumers(profile.Name, realCount);
                         }
                     }
+                    
+                    // Rebalance immediately so newly synced consumers get partition assignments
+                    // before Tick() runs. Otherwise consumers have no partitions → 0 consumption.
+                    group.Rebalance();
                 }
 
                 // Let provider process rate changes / events for this timestep
@@ -389,7 +415,7 @@ namespace MBrokerBench
                         if (deploymentMap.TryGetValue(profile.Name, out var deploymentName))
                         {
                             int desiredCount = group.Consumers.Count(c => c.ConsumerProfile.Name == profile.Name);
-                            int realCount = k8sController.GetReplicaCountAsync(deploymentName).GetAwaiter().GetResult();
+                            int realCount = k8sController.GetLastAppliedCount(deploymentName);
 
                             if (desiredCount != realCount)
                             {
@@ -563,6 +589,8 @@ namespace MBrokerBench
 
                 csvWriter.Flush();
 
+                if (!_headless)
+                {
 #if PRETTY
                 Application.MainLoop.Invoke(() =>
                 {
@@ -587,6 +615,7 @@ namespace MBrokerBench
                     _consumerListView.SetSource(cList);
                 });
 #endif
+                }
 
                 if (lastLagTime != -1)
                 {
@@ -603,7 +632,16 @@ namespace MBrokerBench
 
                 lastLagTime = maxLagTime;
 
-                Thread.Sleep(1);
+                // In real scaling mode, pace the loop to match wall-clock time so K8s
+                // pod startup, health probes, and readiness gates have time to react.
+                if (isRealScaling)
+                {
+                    Thread.Sleep(1000);
+                }
+                else
+                {
+                    Thread.Sleep(1);
+                }
             }
 
             // close csv writer by disposing via using

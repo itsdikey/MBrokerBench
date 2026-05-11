@@ -17,7 +17,7 @@ namespace MBrokerBench.Components
         public List<Partition> AssignedPartitions { get; } = new List<Partition>();
         public ConsumerProfile ConsumerProfile { get; init; }
         public double StartupTimeRemaining { get; set; }
-        public double Efficiency { get; private set; } = 0.5;
+        public double Efficiency { get; internal set; } = 0.5;
         public ConsumerState State { get; set; } = ConsumerState.Booting;
 
         public Consumer(string id, ConsumerProfile consumerProfile)

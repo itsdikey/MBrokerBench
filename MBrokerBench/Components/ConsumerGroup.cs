@@ -225,17 +225,36 @@ namespace MBrokerBench.Components
         {
             var profile = ConsumerProfiles.FirstOrDefault(p => p.Name == profileName) ?? DefaultProfile;
             
-            // Remove virtual consumers of this profile
-            Consumers.RemoveAll(c => c.ConsumerProfile.Name == profileName);
+            var existing = Consumers.Where(c => c.ConsumerProfile.Name == profileName).ToList();
+            int current = existing.Count;
 
-            // Add back the correct number as 'Running'
-            for (int i = 0; i < count; i++)
+            if (current < count)
             {
-                var c = new Consumer($"RC-{profile.ShortCode}-{i}", profile);
-                c.State = ConsumerState.Running;
-                c.StartupTimeRemaining = 0;
-                Consumers.Add(c);
+                // Need to add consumers — preserves any autoscale-added consumers
+                for (int i = current; i < count; i++)
+                {
+                    var c = new Consumer($"RC-{profile.ShortCode}-{i}", profile);
+                    c.State = ConsumerState.Running;
+                    c.Efficiency = 1.0; // SYNC-created consumers represent READY K8s pods at full speed
+                    c.StartupTimeRemaining = 0;
+                    Consumers.Add(c);
+                }
             }
+            else if (current > count)
+            {
+                // Need to remove excess consumers (scale-down from K8s)
+                var toRemove = existing.OrderBy(c => c.AssignedPartitions.Count).TakeLast(current - count).ToList();
+                foreach (var c in toRemove)
+                {
+                    foreach (var p in c.AssignedPartitions.ToList())
+                    {
+                        p.AssignedConsumer = null;
+                        c.AssignedPartitions.Remove(p);
+                    }
+                    Consumers.Remove(c);
+                }
+            }
+            // else current == count: no change needed
             
             MetricsExporter.SetConsumers(Consumers.Count);
         }
@@ -270,16 +289,18 @@ namespace MBrokerBench.Components
                 Autoscale();
             }
 
-            foreach (var c in Consumers)
-            {
-                stepConsumed += c.Consume(timeStepSeconds);
-            }
-
-            // Autoscale check every 30 seconds
+            // Autoscale check every 30 seconds (before consumption, so new consumers
+            // from scale-up can consume in the same tick)
             if (_totalTime - _lastRebalanceTime > 30)
             {
                 Autoscale();
                 _lastRebalanceTime = _totalTime;
+            }
+
+            // Consume AFTER Autoscale so newly added consumers contribute
+            foreach (var c in Consumers)
+            {
+                stepConsumed += c.Consume(timeStepSeconds);
             }
 
             return stepConsumed;

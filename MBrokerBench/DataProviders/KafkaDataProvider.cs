@@ -107,16 +107,27 @@ namespace MBrokerBench.DataProviders
                         var watermark = _pollConsumer.QueryWatermarkOffsets(topicPartition, TimeSpan.FromSeconds(2));
                         long currentRealOffset = watermark.High.Value;
 
-                        // Get committed offset from our target group
+                        // Calculate Lag: difference between high watermark and committed offset.
+                        // If the consumer group has no committed offset for this partition (e.g.,
+                        // brand new group that hasn't consumed anything), ALL messages are unread.
                         if (offsetMap.TryGetValue(partitionId, out long committedOffset))
                         {
                             if (committedOffset < 0) committedOffset = 0;
                             partition.CurrentLag = Math.Max(0, currentRealOffset - committedOffset);
                         }
+                        else if (currentRealOffset > 0)
+                        {
+                            // No committed offset means consumer group has never consumed from
+                            // this partition — the entire backlog is unread.
+                            partition.CurrentLag = currentRealOffset;
+                        }
 
+                        // Calculate Production Rate: change in high watermark since last tick.
+                        // In a pre-loaded scenario (all messages produced before controller starts),
+                        // this will be 0 because the watermark doesn't change between ticks.
+                        // That's correct — no NEW messages are arriving.
                         if (_previousOffsets.TryGetValue(partitionId, out long lastRealOffset))
                         {
-                            // The rate is (current - last) over the interval (which is ~1s)
                             partition.ProductionRate = Math.Max(0, currentRealOffset - lastRealOffset);
                         }
                         _previousOffsets[partitionId] = currentRealOffset;

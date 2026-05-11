@@ -18,21 +18,18 @@ class Program
 
         var envConfig = builder.Get<ConsumerEnvConfig>() ?? new ConsumerEnvConfig();
 
-        using var loggerFactory = LoggerFactory.Create(builder =>
-        {
-            builder.AddConsole();
-        });
-
-        var logger = loggerFactory.CreateLogger<Program>();
-
         var rateLimiter = new TokenBucketLimiter(
             (int)envConfig.MaxRateLimit,
             TimeSpan.FromSeconds(1));
 
         var services = new ServiceCollection()
-            .AddSingleton(logger)
+            .AddLogging(builder => builder.AddConsole())
             .AddSingleton(envConfig)
             .AddSingleton(rateLimiter)
+            .AddSingleton<ITerminationService, TerminationService>()
+            .AddSingleton<IHealthProbeService, HealthProbeService>()
+            .AddSingleton<ICommitTracker, CommitTracker>()
+            .AddSingleton<IRateLogger, RateLogger>()
             .AddSingleton<IMainProgram, MainProgram>()
             .BuildServiceProvider();
 
