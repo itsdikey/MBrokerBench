@@ -1,4 +1,4 @@
-﻿using MBrokerBench.Components;
+using MBrokerBench.Components;
 
 namespace MBrokerBench
 {
@@ -8,8 +8,6 @@ namespace MBrokerBench
         public double RebalanceTimeSeconds { get; set; }
         public ConsumerGroup? ConsumerGroup { get; set; }
 
-        public float _rebalanceTimeSeconds = 5.0f; // rebalance blocking time
-        public float _latencySLASeconds = 30.0f;   // SLA window
         public float _scaleDownUtilizationThreshold = 0.20f; // consider removing consumer if <20% utilized
         public float _scaleUpHysteresis = 1.05f; // require 5% headroom before scaling up
 
@@ -52,7 +50,7 @@ namespace MBrokerBench
             var consumers = ConsumerGroup.Consumers;
 
             double totalRequiredCapacitySLA = ConsumerGroup.AllPartitions
-                .Sum(p => p.ProductionRate + (double)p.GetTotalLag(_rebalanceTimeSeconds) / _latencySLASeconds);
+                .Sum(p => p.ProductionRate + (double)p.GetTotalLag(RebalanceTimeSeconds) / ConsumerGroup.LatencySLASeconds);
 
             int requiredConsumersSLA = (int)Math.Ceiling(totalRequiredCapacitySLA / ConsumerGroup.ConsumerCapacity);
 

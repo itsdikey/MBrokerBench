@@ -33,9 +33,9 @@ namespace MBrokerBench.Strategies
             // Normalize target to raw capacity needed
             double targetRaw = requiredLoad / CapacityExcessFactor;
 
-            // SAFETY: Cap the search space to prevent OOM on massive lag spikes.
-            // 50,000 is enough for ~20 large nodes (2500 each).
-            int maxCapToSearch = (int)Math.Min(50000, Math.Ceiling(targetRaw + profiles.Max(p => p.MaxCapacity)));
+            // SAFETY: Cap the search space dynamically to prevent OOM on massive lag spikes while supporting large fleets.
+            // 5,000,000 easily supports up to 2,000 Large nodes (2,500 capacity each).
+            int maxCapToSearch = (int)Math.Min(5000000, Math.Ceiling(targetRaw + profiles.Max(p => p.MaxCapacity)));
             
             // Adjust target if it exceeded our safety cap
             targetRaw = Math.Min(targetRaw, maxCapToSearch);
@@ -274,8 +274,8 @@ namespace MBrokerBench.Strategies
                 }
             }
 
-            // 4. EMERGENCY CHECK: Unassigned partitions
-            if (additionsThisTick < maxAdditions && partitions.Any(p => p.AssignedConsumer == null))
+            // 4. EMERGENCY CHECK: Unassigned partitions (only if there is actual demand)
+            if (additionsThisTick < maxAdditions && targetDemand > 0 && partitions.Any(p => p.AssignedConsumer == null))
             {
                 Logger.Log($"[AUTOSCALE] Emergency: Provisioning {ConsumerGroup.DefaultProfile.Name} for unassigned partitions.");
                 ConsumerGroup.AddConsumer();
@@ -315,9 +315,6 @@ namespace MBrokerBench.Strategies
                 .Where(c => c.State == ConsumerState.Running)
                 .Sum(c => c.RemainingCapacityWithEfficiency);
             
-            // We must preserve enough slack for the load we are removing.
-            double consumedSlack = 0;
-
             foreach (var item in candidatesForRemoval)
             {
                 if (!consumers.Contains(item)) continue;
@@ -326,7 +323,7 @@ namespace MBrokerBench.Strategies
                 
                 // Slack available specifically in OTHER consumers (Global - MyOwnSlack)
                 double mySlack = item.RemainingCapacityWithEfficiency;
-                double othersSlack = globalSlack - mySlack - consumedSlack;
+                double othersSlack = globalSlack - mySlack;
 
                 if (othersSlack * CapacityExcessFactor > loadToRelocate * 1.1)
                 {
@@ -334,15 +331,9 @@ namespace MBrokerBench.Strategies
                     ConsumerGroup.RemoveConsumer(item);
                     anyRemoved = true;
                     
-                    // The load we just removed needs to fit into the slack of others.
-                    // So we have "used up" that much slack from the pool.
-                    consumedSlack += loadToRelocate;
-                    
-                    // Also, since 'item' is gone, its contribution to globalSlack is gone.
-                    // But we handled that by subtracting 'mySlack' above. 
-                    // To keep the loop consistent for the NEXT item, we need to permanently reduce globalSlack?
-                    // Yes, globalSlack is strictly smaller now.
-                    globalSlack -= mySlack; 
+                    // Since 'item' is gone, its capacity and slack contribution are gone,
+                    // and its workload is redistributed to the remaining consumers, reducing their slack by loadToRelocate.
+                    globalSlack -= (mySlack + loadToRelocate);
                 }
             }
             

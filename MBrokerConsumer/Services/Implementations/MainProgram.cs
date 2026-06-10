@@ -1,4 +1,4 @@
-﻿using Confluent.Kafka;
+using Confluent.Kafka;
 using MBrokerConsumer.Models;
 using Microsoft.Extensions.Logging;
 using System.Threading;
@@ -104,22 +104,25 @@ internal sealed class MainProgram : IMainProgram
                         _rateLogger.MessageConsumed();
 
                         // Log rate + estimated lag every 10s
-                        long totalLag = 0;
-                        foreach (var tp in consumer.Assignment)
+                        if (_rateLogger.ShouldLog)
                         {
-                            try
+                            long totalLag = 0;
+                            foreach (var tp in consumer.Assignment)
                             {
-                                var watermarks = consumer.QueryWatermarkOffsets(tp, TimeSpan.FromSeconds(2));
-                                var position = consumer.Position(tp);
-                                totalLag += Math.Max(0, watermarks.High.Value - position.Value);
+                                try
+                                {
+                                    var watermarks = consumer.QueryWatermarkOffsets(tp, TimeSpan.FromSeconds(2));
+                                    var position = consumer.Position(tp);
+                                    totalLag += Math.Max(0, watermarks.High.Value - position.Value);
+                                }
+                                catch
+                                {
+                                    // skip partitions where lag can't be computed yet
+                                }
                             }
-                            catch
-                            {
-                                // skip partitions where lag can't be computed yet
-                            }
-                        }
 
-                        _rateLogger.TryLogRateAndLag(totalLag);
+                            _rateLogger.TryLogRateAndLag(totalLag);
+                        }
                     }
                 }
                 catch (ConsumeException e)

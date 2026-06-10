@@ -1,4 +1,4 @@
-﻿#define PRETTY
+#define PRETTY
 using ConsolePlot;
 using ConsolePlot.Drawing.Tools;
 using MBrokerBench.Components;
@@ -83,7 +83,7 @@ namespace MBrokerBench
         public static async Task Main()
         {
             // Headless mode: skip Terminal.Gui TUI, use console logging
-            _headless = Environment.GetEnvironmentVariable("NO_TUI") == "true";
+            _headless = Environment.GetEnvironmentVariable("NO_TUI") == "true" || Environment.GetEnvironmentVariable("PRODUCER_MODE") == "true";
             bool headless = _headless;
 
             if (!headless)
@@ -273,7 +273,14 @@ namespace MBrokerBench
             }
 
             var partitions = provider.InitializePartitions();
-            int maxRuntime = provider.MaxRuntimeSteps > 0 ? provider.MaxRuntimeSteps : 600;
+            string maxStepsEnv = System.Environment.GetEnvironmentVariable("MAX_STEPS");
+            int maxRuntime = !string.IsNullOrEmpty(maxStepsEnv) ? int.Parse(maxStepsEnv) : (provider.MaxRuntimeSteps > 0 ? provider.MaxRuntimeSteps : 600);
+
+            if (System.Environment.GetEnvironmentVariable("PRODUCER_MODE") == "true")
+            {
+                await RunWorkloadProducer(provider, maxRuntime);
+                return;
+            }
 
             // Prepare CSV export for timestep series
             var outDir = Path.Combine(AppContext.BaseDirectory, "export_csv");
@@ -696,6 +703,69 @@ namespace MBrokerBench
 #else
             // Console.ReadLine();
 #endif
+        }
+
+        private static async Task RunWorkloadProducer(IDataProvider provider, int maxRuntime)
+        {
+            string bootstrapServers = System.Environment.GetEnvironmentVariable("KAFKA_BOOTSTRAP") ?? "localhost:9092";
+            string topic = System.Environment.GetEnvironmentVariable("KAFKA_TOPIC") ?? "test-1";
+
+            Console.WriteLine($"[WORKLOAD PRODUCER] Starting in producer mode against {bootstrapServers}...");
+            Console.WriteLine($"[WORKLOAD PRODUCER] Using Data Provider: {provider.GetType().Name}");
+            Console.WriteLine($"[WORKLOAD PRODUCER] Topic: {topic}");
+
+            var config = new Confluent.Kafka.ProducerConfig { BootstrapServers = bootstrapServers };
+            using var producer = new Confluent.Kafka.ProducerBuilder<Confluent.Kafka.Null, string>(config).Build();
+
+            var partitions = provider.InitializePartitions();
+
+            for (int step = 1; step <= maxRuntime; step++)
+            {
+                int virtualStep = step;
+                if (maxRuntime < provider.MaxRuntimeSteps && provider.MaxRuntimeSteps > 0)
+                {
+                    virtualStep = (int)Math.Clamp(step * ((double)provider.MaxRuntimeSteps / maxRuntime), 1, provider.MaxRuntimeSteps);
+                }
+                provider.Process(partitions, virtualStep);
+                
+                int totalMessagesSent = 0;
+                var startTime = DateTime.UtcNow;
+
+                foreach (var partition in partitions)
+                {
+                    int partitionId = int.Parse(partition.Id);
+                    int rate = (int)partition.ProductionRate; // messages to send in this second
+
+                    for (int i = 0; i < rate; i++)
+                    {
+                        var message = new Confluent.Kafka.Message<Confluent.Kafka.Null, string>
+                        {
+                            Value = $"step-{step}-msg-{i}-timestamp-{DateTime.UtcNow.Ticks}"
+                        };
+                        
+                        producer.Produce(new Confluent.Kafka.TopicPartition(topic, new Confluent.Kafka.Partition(partitionId)), message, err => {
+                            if (err.Error.IsError)
+                            {
+                                Console.WriteLine($"[ERROR] Failed to produce to partition {partitionId}: {err.Error.Reason}");
+                            }
+                        });
+                        totalMessagesSent++;
+                    }
+                }
+
+                producer.Flush(TimeSpan.FromMilliseconds(500));
+
+                var elapsed = DateTime.UtcNow - startTime;
+                Console.WriteLine($"[Step {step}/{maxRuntime}] Produced {totalMessagesSent} messages across {partitions.Count} partitions. Elapsed: {elapsed.TotalMilliseconds:F1}ms");
+
+                double sleepTimeMs = 1000.0 - elapsed.TotalMilliseconds;
+                if (sleepTimeMs > 0)
+                {
+                    await Task.Delay((int)sleepTimeMs);
+                }
+            }
+
+            Console.WriteLine("[WORKLOAD PRODUCER] Completed.");
         }
     }
 }

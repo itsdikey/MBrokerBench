@@ -1,4 +1,4 @@
-﻿using MBrokerBench.Models;
+using MBrokerBench.Models;
 
 namespace MBrokerBench.Components
 {
@@ -104,8 +104,7 @@ namespace MBrokerBench.Components
         {
             Console.WriteLine($"--- REBALANCING (Blocking for {RebalanceTimeSeconds}s) ---");
 
-            //We are emulating rebalance time by blocking partition production for that duration if reassigned.
-            //This will cause backlog to appear on reassigned partitions.
+            // We are emulating rebalance time by blocking partition consumption for that duration if reassigned.
             var partitionConsumerMap = new Dictionary<string, string?>();
 
             foreach (var consumer in Consumers) 
@@ -121,7 +120,6 @@ namespace MBrokerBench.Components
             // increment rebalance counter
             _rebalanceSteps++;
 
-
             List<ReassignedPartitionDetails> reassignedPartitionsDetails = new List<ReassignedPartitionDetails>();
 
             foreach(var partition in AllPartitions)
@@ -133,13 +131,13 @@ namespace MBrokerBench.Components
                         // count reassignments
                         _totalReassignments++;
                         
-    
                         if(partition.AssignedConsumer != null)
                         {
                             reassignedPartitionsDetails.Add(new ReassignedPartitionDetails(partition.AssignedConsumer.MaxCapacity, partition.ProductionRate));
                         }
 
-                        partition.Produce(RebalanceTimeSeconds);
+                        // Apply the rebalance pause penalty directly here
+                        partition.RebalancePenaltyRemaining = RebalanceTimeSeconds;
                     }
                 }
             }
@@ -163,59 +161,8 @@ namespace MBrokerBench.Components
 
         public void Autoscale()
         {
-            var partitionConsumerMap = new Dictionary<string, string?>();
-
-            foreach (var consumer in Consumers)
-            {
-                foreach (var partition in consumer.AssignedPartitions)
-                {
-                    partitionConsumerMap[partition.Id] = consumer.Id;
-                }
-            }
-
-
             Rebalance();
-
             _assignmentStrategy.AutoScale();
-
-            List<ReassignedPartitionDetails> reassignedPartitionsDetails = new List<ReassignedPartitionDetails>();
-
-            foreach (var partition in AllPartitions)
-            {
-                if (partitionConsumerMap.TryGetValue(partition.Id, out var previousConsumerId))
-                {
-                    if (previousConsumerId != partition.AssignedConsumer?.Id)
-                    {
-                        // count reassignments
-                        _totalReassignments++;
-
-
-                        if (partition.AssignedConsumer != null)
-                        {
-                            reassignedPartitionsDetails.Add(new ReassignedPartitionDetails(partition.AssignedConsumer.MaxCapacity, partition.ProductionRate));
-                        }
-
-                        //partition.Produce(RebalanceTimeSeconds);
-                        //moving to pause logic instead
-                        partition.RebalancePenaltyRemaining = RebalanceTimeSeconds;
-                    }
-                }
-            }
-            _rScoreValue = MathUtils.CalculateRScore(reassignedPartitionsDetails);
-
-            // Update partition metrics labels after rebalance
-            foreach (var p in AllPartitions)
-            {
-                MetricsExporter.SetPartition(p.Id, p.CurrentLag, p.ProductionRate);
-                MetricsExporter.SetPartitionAssignment(p.Id, p.AssignedConsumer?.Id);
-            }
-
-            // Update consumer metrics after rebalance
-            foreach (var c in Consumers)
-            {
-                double util = c.GetCurrentWorkloadRate() / c.MaxCapacity * 100.0;
-                MetricsExporter.SetConsumerMetrics(c.Id, util, c.AssignedPartitions.Count);
-            }
         }
 
         private double _lastRebalanceTime;

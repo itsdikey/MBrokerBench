@@ -1,4 +1,4 @@
-﻿using MBrokerBench.Components;
+using MBrokerBench.Components;
 using MBrokerBench.Models;
 
 namespace MBrokerBench.Strategies

@@ -110,8 +110,7 @@ deploy-consumers:
 	@echo "Deploying consumer ConfigMap..."
 	kubectl apply -f k8s/mbroker-consumer-config.yaml
 	@echo "Deploying consumer Deployments (small + large)..."
-	kubectl apply -f k8s/mbroker-consumer-small.yaml
-	kubectl apply -f k8s/mbroker-consumer-large.yaml
+	kubectl apply -f k8s/consumer-deployments.yaml
 
 # Full Phase 2 stack deploy (run after Phase 0 is up)
 phase2-up: deploy-controller deploy-consumers

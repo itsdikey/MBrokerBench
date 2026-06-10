@@ -27,7 +27,7 @@ public class RateLogger : IRateLogger
 
     public bool TryLogRateAndLag(long totalLag)
     {
-        if (_stopwatch.Elapsed < _interval)
+        if (!ShouldLog)
             return false;
 
         var elapsed = _stopwatch.Elapsed.TotalSeconds;
@@ -41,4 +41,6 @@ public class RateLogger : IRateLogger
         _stopwatch.Restart();
         return true;
     }
+
+    public bool ShouldLog => _stopwatch.Elapsed >= _interval;
 }

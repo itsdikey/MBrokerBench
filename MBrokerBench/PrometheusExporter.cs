@@ -49,6 +49,7 @@ namespace MBrokerBench
                     if (!resp.IsSuccessStatusCode)
                     {
                         Console.WriteLine($"[EXPORT] An error occurred while exporting metric {metric}");
+                        continue;
                     }
 
                     using var stream = await resp.Content.ReadAsStreamAsync();

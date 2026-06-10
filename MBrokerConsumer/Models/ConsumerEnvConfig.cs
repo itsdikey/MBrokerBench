@@ -1,4 +1,4 @@
-﻿using Confluent.Kafka;
+using Confluent.Kafka;
 using Microsoft.Extensions.Logging;
 using MSLogLevel = Microsoft.Extensions.Logging.LogLevel;
 
@@ -21,7 +21,7 @@ namespace MBrokerConsumer.Models
             {
                 BootstrapServers = BootstrapServers,
                 GroupId = GroupId,
-                AutoOffsetReset = AutoOffsetReset.Latest,
+                AutoOffsetReset = AutoOffsetReset.Earliest,
                 EnableAutoCommit = false,
                 FetchWaitMaxMs = 100 // Reduce latency for rate limiting
             };

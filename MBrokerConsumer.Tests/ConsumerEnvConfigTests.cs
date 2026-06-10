@@ -106,11 +106,11 @@ public class ConsumerEnvConfigGetLogLevelTests
 public class ConsumerEnvConfigToConsumerConfigTests
 {
     [Fact]
-    public void ToConsumerConfig_ShouldSetAutoOffsetResetToLatest()
+    public void ToConsumerConfig_ShouldSetAutoOffsetResetToEarliest()
     {
         var config = new ConsumerEnvConfig();
         var kafkaConfig = config.ToConsumerConfig();
-        Assert.Equal(AutoOffsetReset.Latest, kafkaConfig.AutoOffsetReset);
+        Assert.Equal(AutoOffsetReset.Earliest, kafkaConfig.AutoOffsetReset);
     }
 
     [Fact]

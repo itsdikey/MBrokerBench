@@ -6,4 +6,6 @@ public interface IRateLogger
     void MessageConsumed();
     /// <summary>Every 10s, logs rate + lag and resets. Returns true if logged.</summary>
     bool TryLogRateAndLag(long totalLag);
-}
+    /// <summary>Returns true if the log interval has elapsed and a log attempt should be made.</summary>
+    bool ShouldLog { get; }
+}
