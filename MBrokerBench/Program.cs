@@ -202,6 +202,10 @@ namespace MBrokerBench
                     assignmentStrategy = new PaperLeastLoadedBinPackStrategy();
                     shortCodeAlgorithm = "swl";
                     break;
+                case "KafkaDefault":
+                    assignmentStrategy = new KafkaDefaultAssignment();
+                    shortCodeAlgorithm = "kafka_default";
+                    break;
                 case "Linear":
                     assignmentStrategy = new ModifiedWorstFitAssignment(); // Uses total load / capacity
                     shortCodeAlgorithm = "linear";
