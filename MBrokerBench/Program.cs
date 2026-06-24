@@ -248,17 +248,18 @@ namespace MBrokerBench
             {
                 // Select provider based on environment variable
                 string dataProviderEnv = System.Environment.GetEnvironmentVariable("DATA_PROVIDER") ?? "Poisson";
+                string scenarioEnv = System.Environment.GetEnvironmentVariable("SCENARIO") ?? "Uniform";
                 IDataProvider baseProvider = dataProviderEnv switch
                 {
-                    "Poisson" => new PoissonDataProvider(PoissonDataProvider.ScenarioUniform),
-                    "Sinusoid" => new SinusoidDataProvider(SinusoidDataProvider.ScenarioUniform),
+                    "Poisson" => new PoissonDataProvider(scenarioEnv),
+                    "Sinusoid" => new SinusoidDataProvider(scenarioEnv),
                     "Kafka" => new KafkaDataProvider(
                         System.Environment.GetEnvironmentVariable("KAFKA_BOOTSTRAP") ?? "localhost:9092",
                         System.Environment.GetEnvironmentVariable("PROMETHEUS_URL") ?? "http://localhost:9090",
                         System.Environment.GetEnvironmentVariable("KAFKA_TOPIC") ?? "test-1",
                         System.Environment.GetEnvironmentVariable("KAFKA_GROUP") ?? "test-group"
                     ),
-                    "NYTaxi" or _ => new NYTaxiDataProvider(SinusoidDataProvider.ScenarioUniform)
+                    "NYTaxi" or _ => new NYTaxiDataProvider(scenarioEnv)
                 };
 
 
