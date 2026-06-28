@@ -1,4 +1,4 @@
-﻿using MBrokerBench.Components;
+using MBrokerBench.Components;
 
 namespace MBrokerBench.DataProviders
 {
@@ -28,7 +28,7 @@ namespace MBrokerBench.DataProviders
 
         public List<Partition> InitializePartitions()
         {
-            int count = (_scenario == "Skewed9") ? 9 : 5;
+            int count = (_scenario == "Skewed36" || _scenario == "Uniform36") ? 36 : ((_scenario == "Skewed9") ? 9 : 5);
             return Enumerable.Range(0, count)
                 .Select(i => new Partition(i.ToString()))
                 .ToList();
@@ -37,8 +37,12 @@ namespace MBrokerBench.DataProviders
         public List<Partition> Process(List<Partition> partitions, int timeStep)
         {
             // 1. Determine base intensity for this phase of the 20-min window
-            double systemLambda = (timeStep >= 300 && timeStep <= 900)
+            double baseLambda = (timeStep >= 300 && timeStep <= 900)
                                     ? PeakTotalLambda : OffPeakTotalLambda;
+
+            double systemLambda = (_scenario == "Skewed36" || _scenario == "Uniform36")
+                                    ? baseLambda * 5.0
+                                    : baseLambda;
 
             for (int i = 0; i < partitions.Count; i++)
             {
@@ -63,6 +67,7 @@ namespace MBrokerBench.DataProviders
             {
                 "Skewed5" => (index < 3) ? (totalLambda * 0.80) / 3 : (totalLambda * 0.20) / 2,
                 "Skewed9" => (index < 2) ? (totalLambda * 0.50) / 2 : (totalLambda * 0.50) / 7,
+                "Skewed36" => (index < 8) ? (totalLambda * 0.50) / 8 : (totalLambda * 0.50) / 28,
                 _ => totalLambda / total
             };
         }

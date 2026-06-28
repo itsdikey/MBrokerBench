@@ -355,6 +355,7 @@ namespace MBrokerBench
             var deploymentMap = new Dictionary<string, string>
             {
                 { "Small", "mbroker-consumer-small" },
+                { "Medium", "mbroker-consumer-medium" },
                 { "Large", "mbroker-consumer-large" }
             };
 
