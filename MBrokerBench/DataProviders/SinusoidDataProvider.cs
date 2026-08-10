@@ -1,4 +1,4 @@
-﻿using MBrokerBench.Components;
+using MBrokerBench.Components;
 
 namespace MBrokerBench.DataProviders
 {
@@ -31,7 +31,7 @@ namespace MBrokerBench.DataProviders
 
         public List<Partition> InitializePartitions()
         {
-            int count = _scenario == "Skewed9" ? 9 : 5;
+            int count = (_scenario == "Skewed36" || _scenario == "Uniform36") ? 36 : (_scenario == "Skewed9" || _scenario == "Uniform") ? 9 : 5;
             return Enumerable.Range(0, count)
                 .Select(i => new Partition(i.ToString()))
                 .ToList();
@@ -41,6 +41,12 @@ namespace MBrokerBench.DataProviders
         {
             // 1. Calculate the System-wide Rate at this second
             double totalSystemRate = GetCurrentSinusoidRate(timeStep);
+
+            // Scale traffic for 36-partition runs
+            if (_scenario == "Skewed36" || _scenario == "Uniform36")
+            {
+                totalSystemRate *= 5.0; // Baseline 5x, dynamically adjusted by python run scripts
+            }
 
             // 2. Distribute with Skew Logic
             for (int i = 0; i < partitions.Count; i++)
@@ -70,14 +76,16 @@ namespace MBrokerBench.DataProviders
         {
             return _scenario switch
             {
-                // 80% of total sine wave + noise goes to first 3 partitions
-                ScenarioSkewed5 => (index < 3) ? (totalRate * 0.80) / 3 : (totalRate * 0.20) / 2,
+                ScenarioSkewed5 => (index < 2) ? (totalRate * 0.80) / 2 : (totalRate * 0.20) / 3,
 
                 // 50% of total sine wave + noise goes to first 2 partitions
                 ScenarioSkewed9 => (index < 2) ? (totalRate * 0.50) / 2 : (totalRate * 0.50) / 7,
 
+                // 50% of total sine wave + noise goes to first 8 partitions, other 50% to remaining 28 partitions
+                "Skewed36" => (index < 8) ? (totalRate * 0.50) / 8 : (totalRate * 0.50) / 28,
+
                 // Uniform distribution
-                ScenarioUniform => totalRate / total,
+                ScenarioUniform or "Uniform36" => totalRate / total,
 
                 _ => totalRate / total
             };

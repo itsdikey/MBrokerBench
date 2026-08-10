@@ -21,14 +21,17 @@ public class CommitTracker : ICommitTracker
         if (_stopwatch.Elapsed < _interval)
             return false;
 
+        var elapsed = _stopwatch.Elapsed;
         try
         {
             commitAction();
-            _logger.LogDebug("Committed offsets after {Elapsed:F1}s", _stopwatch.Elapsed.TotalSeconds);
+            _logger.LogInformation(
+                "[COMMIT] Success — committed offsets after {Elapsed:F1}s (interval: {Interval:F1}s)",
+                elapsed.TotalSeconds, _interval.TotalSeconds);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning("Commit failed: {Message}", ex.Message);
+            _logger.LogWarning("[COMMIT] Failed: {Message}", ex.Message);
         }
 
         _stopwatch.Restart();

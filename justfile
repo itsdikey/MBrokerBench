@@ -111,6 +111,10 @@ deploy-consumers:
 	kubectl apply -f k8s/mbroker-consumer-config.yaml
 	@echo "Deploying consumer Deployments (small + large)..."
 	kubectl apply -f k8s/consumer-deployments.yaml
+	@echo "Removing stale legacy assignment env vars from consumer Deployments..."
+	kubectl set env deployment/mbroker-consumer-small MANUAL_PARTITION_ASSIGNMENT_ENABLED- ASSIGNMENT_CONFIG_MAP_NAME- ASSIGNMENT_POLL_INTERVAL_SECONDS- PARTITION_ASSIGNMENT_STRATEGY- KAFKA_ASSIGNOR-
+	kubectl set env deployment/mbroker-consumer-medium MANUAL_PARTITION_ASSIGNMENT_ENABLED- ASSIGNMENT_CONFIG_MAP_NAME- ASSIGNMENT_POLL_INTERVAL_SECONDS- PARTITION_ASSIGNMENT_STRATEGY- KAFKA_ASSIGNOR-
+	kubectl set env deployment/mbroker-consumer-large MANUAL_PARTITION_ASSIGNMENT_ENABLED- ASSIGNMENT_CONFIG_MAP_NAME- ASSIGNMENT_POLL_INTERVAL_SECONDS- PARTITION_ASSIGNMENT_STRATEGY- KAFKA_ASSIGNOR-
 
 # Full Phase 2 stack deploy (run after Phase 0 is up)
 phase2-up: deploy-controller deploy-consumers

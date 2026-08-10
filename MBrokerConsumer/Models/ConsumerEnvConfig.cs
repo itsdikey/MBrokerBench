@@ -15,6 +15,15 @@ namespace MBrokerConsumer.Models
         public int DrainTimeoutSeconds { get; set; } = 25;
         public int CommitIntervalSeconds { get; set; } = 5;
 
+        // Manual partition assignment (default off — normal Subscribe path used when false)
+        public bool ManualPartitionAssignmentEnabled { get; set; } = false;
+        public string AssignmentConfigMapPath { get; set; } = "/etc/mbroker-assignments/assignments.json";
+        public int AssignmentPollIntervalSeconds { get; set; } = 15;
+        public string PodName { get; set; } = "";
+        // Maximum time to wait for this pod's entry to appear in the ConfigMap at startup
+        // before exiting with a fatal error. Default 60s gives K8s enough time to start pods.
+        public int AssignmentStartupTimeoutSeconds { get; set; } = 60;
+
         public ConsumerConfig ToConsumerConfig()
         {
             return new ConsumerConfig

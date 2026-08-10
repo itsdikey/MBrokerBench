@@ -28,7 +28,7 @@ namespace MBrokerBench.DataProviders
 
         public List<Partition> InitializePartitions()
         {
-            int count = (_scenario == "Skewed36" || _scenario == "Uniform36") ? 36 : ((_scenario == "Skewed9") ? 9 : 5);
+            int count = (_scenario == "Skewed36" || _scenario == "Uniform36") ? 36 : (_scenario == "Skewed9" || _scenario == "Uniform") ? 9 : 5;
             return Enumerable.Range(0, count)
                 .Select(i => new Partition(i.ToString()))
                 .ToList();
@@ -65,7 +65,7 @@ namespace MBrokerBench.DataProviders
         {
             return _scenario switch
             {
-                "Skewed5" => (index < 3) ? (totalLambda * 0.80) / 3 : (totalLambda * 0.20) / 2,
+                "Skewed5" => (index < 2) ? (totalLambda * 0.80) / 2 : (totalLambda * 0.20) / 3,
                 "Skewed9" => (index < 2) ? (totalLambda * 0.50) / 2 : (totalLambda * 0.50) / 7,
                 "Skewed36" => (index < 8) ? (totalLambda * 0.50) / 8 : (totalLambda * 0.50) / 28,
                 _ => totalLambda / total

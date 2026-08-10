@@ -25,7 +25,7 @@ public class RateLogger : IRateLogger
 
     public long TotalConsumed => Interlocked.Read(ref _totalCount);
 
-    public bool TryLogRateAndLag(long totalLag)
+    public bool TryLogRateAndLag(long totalLag, int assignmentCount = 0)
     {
         if (!ShouldLog)
             return false;
@@ -33,10 +33,11 @@ public class RateLogger : IRateLogger
         var elapsed = _stopwatch.Elapsed.TotalSeconds;
         var count = Interlocked.Exchange(ref _periodCount, 0);
         var rate = count / elapsed;
+        var total = Interlocked.Read(ref _totalCount);
 
         _logger.LogInformation(
-            "Consumer rate: {Rate:F0} msgs/s, estimated lag: {Lag:N0}",
-            rate, totalLag);
+            "Consumer rate: {Rate:F0} msgs/s, estimated lag: {Lag:N0}, assignments: {Assignments}, total consumed: {Total}",
+            rate, totalLag, assignmentCount, total);
 
         _stopwatch.Restart();
         return true;

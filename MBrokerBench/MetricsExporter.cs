@@ -26,6 +26,9 @@ namespace MBrokerBench
         // Total production rate metric
         private static Gauge? TotalProductionRateGauge;
 
+        // Total consumption rate metric (real-mode, from Kafka committed offsets)
+        private static Gauge? TotalConsumptionRateGauge;
+
         // Partition reassignment metrics
         private static Counter? PartitionReassignmentsCounter; // labeled by strategy/run
         private static Counter? PartitionReassignmentsPerPartitionCounter; // label: partition, strategy, run
@@ -57,6 +60,9 @@ namespace MBrokerBench
 
                 // Total production rate
                 TotalProductionRateGauge = Metrics.CreateGauge("total_system_production_rate_msgs_per_sec", "Total system production rate (msgs/sec)", new GaugeConfiguration { LabelNames = new[] { "strategy", "run" } });
+
+                // Total consumption rate (real-mode only, 0 in virtual mode)
+                TotalConsumptionRateGauge = Metrics.CreateGauge("total_system_consumption_rate_msgs_per_sec", "Total system consumption rate (msgs/sec)", new GaugeConfiguration { LabelNames = new[] { "strategy", "run" } });
 
                 // Create reassignment counters
                 PartitionReassignmentsCounter = Metrics.CreateCounter("partition_reassignments_total", "Total number of partition reassignments to a different consumer", new CounterConfiguration { LabelNames = new[] { "strategy", "run" } });
@@ -120,6 +126,11 @@ namespace MBrokerBench
         public static void SetTotalProductionRate(double rate)
         {
             TotalProductionRateGauge?.WithLabels(_strategy, _runId).Set(rate);
+        }
+
+        public static void SetTotalConsumptionRate(double rate)
+        {
+            TotalConsumptionRateGauge?.WithLabels(_strategy, _runId).Set(rate);
         }
 
         public static void SetPartition(string id, long lag, double rate)

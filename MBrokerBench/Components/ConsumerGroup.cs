@@ -168,6 +168,12 @@ namespace MBrokerBench.Components
         private double _lastRebalanceTime;
         private double _totalTime = 0;
 
+        // Configurable autoscale/rebalance timing (set once per class load)
+        private static readonly double InitialAutoscaleDelaySeconds =
+            double.TryParse(Environment.GetEnvironmentVariable("INITIAL_AUTOSCALE_DELAY_SECONDS"), out var d1) ? d1 : 30;
+        private static readonly double AutoscaleIntervalSeconds =
+            double.TryParse(Environment.GetEnvironmentVariable("AUTOSCALE_INTERVAL_SECONDS"), out var d2) ? d2 : 30;
+
         public void SyncRealConsumers(string profileName, int count)
         {
             var profile = ConsumerProfiles.FirstOrDefault(p => p.Name == profileName) ?? DefaultProfile;
@@ -206,18 +212,14 @@ namespace MBrokerBench.Components
             MetricsExporter.SetConsumers(Consumers.Count);
         }
 
-        internal long Tick(double timeStepSeconds, bool simulateProduction = true)
+        // Shared helper: advances time, ticks consumers, handles lifecycle transitions,
+        // triggers Autoscale on boot->running, and triggers periodic Autoscale using
+        // INITIAL_AUTOSCALE_DELAY_SECONDS for the first fire and AUTOSCALE_INTERVAL_SECONDS
+        // for subsequent fires.
+        private void TickShared(double timeStepSeconds)
         {
             _totalTime += timeStepSeconds;
 
-            // Production (Skip in Real mode as DataProvider handles it)
-            if (simulateProduction)
-            {
-                AllPartitions.ForEach(p => p.Produce(timeStepSeconds));
-            }
-
-            // Consumption
-            long stepConsumed = 0;
             bool consumerCameOnline = false;
             foreach (var c in Consumers)
             {
@@ -236,21 +238,44 @@ namespace MBrokerBench.Components
                 Autoscale();
             }
 
-            // Autoscale check every 30 seconds (before consumption, so new consumers
-            // from scale-up can consume in the same tick)
-            if (_totalTime - _lastRebalanceTime > 30)
+            // Periodic autoscale: first fire at INITIAL_AUTOSCALE_DELAY_SECONDS, then every AUTOSCALE_INTERVAL_SECONDS
+            bool shouldPeriodicAutoscale = _lastRebalanceTime == 0
+                ? _totalTime >= InitialAutoscaleDelaySeconds
+                : _totalTime - _lastRebalanceTime >= AutoscaleIntervalSeconds;
+
+            if (shouldPeriodicAutoscale)
             {
                 Autoscale();
                 _lastRebalanceTime = _totalTime;
             }
+        }
 
-            // Consume AFTER Autoscale so newly added consumers contribute
+        // Virtual mode: simulates production, runs shared lifecycle/autoscale logic,
+        // then runs consumption via virtual consumers. Returns simulated consumed count.
+        public long TickVirtual(double timeStepSeconds)
+        {
+            // Production
+            AllPartitions.ForEach(p => p.Produce(timeStepSeconds));
+
+            // Shared lifecycle, boot detection, and periodic Autoscale
+            TickShared(timeStepSeconds);
+
+            // Consumption: virtual consumers drain the simulated backlog
+            long stepConsumed = 0;
             foreach (var c in Consumers)
             {
                 stepConsumed += c.Consume(timeStepSeconds);
             }
 
             return stepConsumed;
+        }
+
+        // Real-control-only mode: runs shared lifecycle/autoscale logic only.
+        // No production simulation (DataProvider/Kafka handles it).
+        // No consumption simulation (Kafka consumers drain real lag).
+        public void TickRealControlOnly(double timeStepSeconds)
+        {
+            TickShared(timeStepSeconds);
         }
     }
 }

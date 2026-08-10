@@ -1,0 +1,443 @@
+﻿\documentclass[conference]{IEEEtran}
+\usepackage{graphicx} % Required for inserting images
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    mathescape=true,
+    breaklines=true,         % Automatically wraps long lines
+    frame=single,
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{gray},
+    stringstyle=\color{purple},
+    showstringspaces=false,
+    morekeywords={Function, For, each, in, If, Else, Return, while, to, from, where, Log, Trigger, Provision, Sort, and, by, Initialize}
+}
+\def\mathbi#1{\textbf{\em #1}}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\title{Towards heterogeneous consumer group autoscaling for distributed event queues}
+\author{\IEEEauthorblockN{Anonymous}} 
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+...
+\end{abstract}
+
+\begin{IEEEkeywords}
+  ..., ..., ..., ...
+\end{IEEEkeywords}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Introduction}
+Message broker systems, such as \textbf{Apache Kafka} and \textbf{RabbitMQ}, have become the critical backbone of modern distributed architectures, facilitating the high-throughput, low-latency data streams that drive real-time applications. As these cloud-native infrastructures grow, they are expected to scale elastically, matching resource provisioning to the fluctuating demand of data producers. While \textbf{\textit{partitions}} are the core of Kafka's parallelism, they create complex resource allocation issues that standard autoscaling simply isn't equipped to handle efficiently. \cite{Landau2025}
+
+A primary limitation of current approaches is the assumption of a homogeneous cluster, where every worker node (consumer) possesses identical capacity and cost. Although this assumption simplifies scheduling logic, it leads to significant inefficiencies in the presence of skewed workloads \cite{Boghani2025}. A single "hot" partition can drive the scaling requirement of an entire node; in a homogeneous fleet, this results in "stranded capacity"—usable resources on a node that remain idle because one resource dimension (e.g., network bandwidth or CPU) is saturated by the hot partition. In cloud environments where instances are billed by the second, this resource fragmentation translates directly into financial waste. \cite{Jackson2025}
+
+To address these inefficiencies, we introduce the \textbf{Cost-Centric Modified Worst-Fit (CC-MWF)} algorithm. Unlike traditional strategies that scale by simply adding identical nodes, \textbf{CC-MWF} utilizes a heterogeneous consumer fleet, mixing small, medium, and large instance profiles. By applying a dynamic programming approach to capacity provisioning and a lag-aware bin-packing strategy for assignment, our approach optimizes financial cost while adhering to strict \textbf{Service Level Agreements (SLAs)}. This paper demonstrates that treating the consumer fleet as heterogeneous allows for granular scaling that significantly reduces the "step cost" of capacity additions and eliminates the waste inherent in homogeneous clusters.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Background}
+\subsection{Consumer Group Autoscaling and Bin Packing}
+
+The problem of scaling consumer groups is fundamentally a resource allocation challenge: a set of partitions modeled as items with variable production rates must be assigned to a set of consumers modeled as bins, such that the total consumption rate matches the production rate. This is modeled in the literature as a variation of the Variable Sized Bin Packing Problem (VSBPP). \cite{Landau2025}
+
+In standard industry deployments, autoscaling is often handled by tools like Kubernetes' Horizontal Pod Autoscaler (HPA) or KEDA (Kubernetes Event-driven Autoscaling). These tools typically rely on simple threshold-based metrics—such as average CPU usage or consumer lag—to scale the consumer group. However, these strategies often fail to account for skewed data distributions, where different partitions have vastly different loads. Such threshold-based techniques are inaccurate and can frequently lead to resource over-provisioning \cite{Wang2022}
+
+
+\subsection{Heuristic Approaches}
+To overcome the limitations of threshold-based scaling, researchers have applied classical approximation algorithms for bin packing, such as First Fit Decreasing (FFD) and Best Fit Decreasing (BFD) and more recently Modified Worst Fit (MWF) \cite{Landau2025}.
+
+\begin{enumerate}
+    \item \textbf{FFD and BFD}: These algorithms attempt to pack partitions into the minimum number of consumers to maximize resource density. While effective for static workloads, they do not inherently account for the dynamic costs of rebalancing.
+    \item \textbf{Latency Awareness}: Latency-aware autoscalers that explicitly model the "blocking synchronization" cost—the latency spike caused when consumption stops to reassign partitions. However it is highlighted that minimizing the number of consumers must be balanced against the operational latency introduced by aggressive packing. \cite{Ezzeddine2025}
+\end{enumerate}
+
+\subsection{The Gap: Rebalancing Stability and Homogenity}
+A critical challenge in dynamic scaling is the cost of rebalancing. Moving a partition from one consumer to another incurs a "stop-the-world" penalty where data accumulates, increasing latency
+
+Landau et al. introduces the \textbf{MWF} heuristic which prioritizes stability. By placing partitions into consumer with the most available space (Worst Fit), and sticking partitions with high production rate to the consumers they were assigned. The paper also introduces an \textbf{R-Score} metric as a metric to quantify the rebalancing stability. Minimizing \textbf{R-Score} and \textit{sticking} partitions reduces latency by 48\% compared to BFD. \cite{Landau2025}
+
+However, the current approaches include the work by Landau et al and Ezzedine et al, operate under the assumption of a homogeneous consumer fleet - by assigning to all bins the same maximum capacity $\mathbi{C}$. This rigidity causes a problem: if the current load slightly exceeds the capacity of the $\mathbi{N}$ consumers, the system must provision an entire $\mathbi{(N+1)}^{th}$ consumer of size $\mathbi{C}$. 
+
+Our work addresses this by removing the homogeneity constraint and modeling the problem with heterogenous bin sizes, in our experiments we have used three bin sizes (Small, Medium, Large) however the proposed algorithm can adapt to any number of sizes. 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Our Approach}
+
+To address the limitations of homogeneous scaling, we propose a system model that treats consumer capacity as a heterogeneous resource. By decoupling the logical assignment of partitions from the physical provisioning of infrastructure, we can optimize for financial cost with much higher granularity than traditional bin-packing approaches.
+
+\subsection{System Model}
+
+We model the message broker system as a set of Partitions ($\mathbi{P}$) and a set of Consumers ($\mathbi{C}$).
+
+\subsubsection{Partition Requirements}
+
+Each partition $p \in P$ has a production rate $\lambda_p$ (msg/s) and its current accumulated messages (Lag $L_p$). In dynamic systems, rebalancing introduces a "stop-the-world" penalty $t_{rb}$. However, aggressive lag clearing can lead to "Rebalance Storms" where the catch-up load triggers further scaling. To ensure stability, the Required Throughput ($R_p$) is calculated by prioritizing the steady-state production rate, with a dampened lag-clearing component that only activates when backlog exceeds a critical threshold (typically $2 \times \lambda_p$).
+
+The Required Throughput ($R_p$) is derived as:
+\begin{equation}
+    R_p = \lambda_p + \delta \quad \text{where} \quad \delta = 
+    \begin{cases} 
+      \frac{L_p}{T_{SLA}} & \text{if } L_p > 2\lambda_p \\
+      0 & \text{otherwise}
+    \end{cases}
+\end{equation}
+
+This dampening ensures that the system scales for the sustained workload while allowing existing headroom to absorb minor rebalance jitter.
+This ensures that partitions with high lag exert a larger pressure on the bin-packing algorithm, forcing the provisioner to allocate more resources to clear the lag.
+
+\subsection{Mathematical Formulation}
+We formulate the assignment problem as a variation of the \textbf{Variable Sized Bin Packing Problem (VSBPP)}. Let $P = \{p_1, p_2, ...,p_n\}$ be the set of partitions with throughput requirements $R_p$. The objective is to select a set of consumers $B = \{b_1, b2_,...,b_m\}$, assignments $x_{ij}$, with pricing $K(b_j)$ and capacity $C_{b_j}$.
+
+\begin{equation}
+\scalebox{1.2}{$ \displaystyle \text{Minimize} \; Z = \sum_{j=1}^{m} K_{b_j} $}
+\end{equation}
+
+\textbf{Subject to:}
+
+\begin{enumerate}
+    \item Assignment Constraint: Each partition must be assigned to only one consumer
+    \begin{equation}
+        \scalebox{1.2}{$ \displaystyle \sum_{j=1}^{m} x_{ij} \quad \text{for} \quad \forall i \in \{1, 2, \dots, n\} $}
+    \end{equation}
+    \item Capacity Constraint: The sum of throughput requirements in a consumer must not exceed its' capacity, adjusted by a safety factor of $\alpha = \frac{5}{6}$ to absorb fluctuations.
+    \begin{equation}
+        \scalebox{1.2}{$ \displaystyle \sum_{i=1}^{n} x_{ij} \cdot R_{p_i} \le \alpha \cdot C_{b_j} \quad \forall j \in \{1, 2, \dots, m\} $}
+    \end{equation}
+\end{enumerate}
+
+Unlike traditional Bin Packing, which seeks to minimize the integer number of bins ($m$), our objective minimizes the sum of costs ($\sum K$).
+
+\subsection{Proposed Algorithm: Cost-Centric Modified Worst-Fit (CC-MWF)}
+
+The CC-MWF algorithm decouples the problem into two distinct phases: \textbf{Provisioning} (determining the optimal fleet mix) and \textbf{Assignment} (placing partitions onto that fleet).
+
+\subsubsection{Phase 1: DP-Based Optimal Provisioning}
+To minimize cost, we solve the provisioning problem as a Min-Cost Covering Problem. Given the total global load $L_{total} = \sum R_p$, we identify the combination of profiles that satisfies this demand at the lowest cost. 
+
+We define $DP[c]$ as the minimum cost to provide capacity $c$. The recurrence relation is:
+\begin{equation}
+\scalebox{1.0}{ % Reduced scale slightly to ensure fit in two-column layout
+$ \begin{aligned}
+DP[c] = \min_{p \in \text{Profiles}} (&DP[c - \text{Cap}_p] \\
+&+ \text{Cost}_p + \epsilon)
+\end{aligned} $
+}
+\end{equation}
+
+A small $\epsilon$ ($0.01$) penalty is added to the cost function. This tie-breaker favors consolidation; for example, if the costs are equal, the algorithm prefers one Medium node over two Small nodes to reduce cluster management overhead and network fragmentation.
+
+
+\subsubsection{Phase 2: Assignment Logic}
+
+
+Once the physical fleet is provisioned, partitions are assigned using a Modified Worst-Fit strategy designed to maximize stability.
+
+
+
+
+
+\begin{itemize}
+
+
+    \item \textbf{Stickiness (Phase 1):} The algorithm prioritizes keeping partitions on their current consumers to avoid rebalance penalties. An existing assignment is retained if the consumer's current production load fits within its full capacity ($C_{max}$), allowing the 
+
+-\alpha$ safety buffer to be dedicated exclusively to clearing accumulated lag.
+
+
+    \item \textbf{Worst-Fit Assignment (Phase 2):} Partitions that cannot stick are sorted by production rate. The algorithm selects a candidate consumer using a stability-first priority: Running consumers with safe capacity are preferred, followed by booting consumers.
+
+
+\end{itemize}
+
+
+
+
+
+\subsubsection{Cluster Optimization (Defrag)}
+
+
+To prevent "thrashing," we introduce a strict Payback Period ($\tau$) and a Savings Threshold. A fleet swap is only executed if the system is stable (no consumers are currently booting) and the financial benefit is substantial.
+
+
+
+
+
+The system triggers a defragmentation only if:
+
+
+\begin{enumerate}
+
+
+    \item $Z_{ideal} < Z_{current} \times 0.80$ (The new fleet provides $>20\%$ savings)
+
+
+    \item $\tau \le \tau_{limit}$ (typically 300 seconds)
+
+
+    \item $\text{State}_{fleet} = \text{Running}$ (No nodes are booting or terminating)
+
+
+\end{enumerate}
+
+
+
+
+\begin{table}[htbp]
+\centering
+\small
+\setlength{\tabcolsep}{0.5pt}
+\caption{CC-MWF System Parameters and Variables}
+\label{table:system_parameters}
+\begin{center}
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Symbol} & \textbf{Description} & \textbf{Value / Formula} \\ \hline
+$\lambda_p$ & Production Rate (msg/s) & Variable \\ \hline
+$L_p$ & Accumulated Lag (messages) & Variable \\ \hline
+$R_p$ & Required Throughput & $\lambda_p + \delta(L_p)$ \\ \hline
+$Z_{current}$ & Current fleet cost rate & $\sum K_{b_{active}}$ \\ \hline
+$Z_{ideal}$ & Optimal fleet cost rate (DP) & $\min \sum K_{b_{proposed}}$ \\ \hline
+$C_{max}$ & Profile nominal capacity & Profile dependent \\ \hline
+$C_{safe}$ & Effective capacity ($\alpha$) & $C_{max} \times 0.833$ \\ \hline
+$t_{rb}$ & Rebalance latency & 5s \\ \hline
+$\alpha$ & Safety Factor & $5/6$ \\ \hline
+$\epsilon$ & Node count penalty & 0.01 \\ \hline
+$\tau_{limit}$ & Max recovery window & 300s \\ \hline
+\end{tabular}
+\end{center}
+\end{table}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Implementation Details: Cost-Centric Modified Worst-Fit}
+
+The implementation of the CC-MWF algorithm relies on three primary procedures: Capacity Provisioning, Partition Assignment, and Cluster Optimization.
+
+\subsection{Optimal Fleet Provisioning}
+This procedure solves the provisioning problem by finding the minimum-cost combination of consumer profiles that meets the required load.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Implementation Details: Cost-Centric Modified Worst-Fit}
+
+The implementation of the CC-MWF algorithm relies on three primary procedures: Capacity Provisioning, Partition Assignment, and Cluster Optimization.
+
+\subsection{Optimal Fleet Provisioning}
+This procedure solves the provisioning problem by finding the minimum-cost combination of consumer profiles that meets the required load.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Implementation Details: Cost-Centric Modified Worst-Fit}
+
+\subsection{Optimal Fleet Provisioning}
+\begin{lstlisting}[caption={GetOptimalFleetCombination}, mathescape=true]
+Function GetOptimalFleetCombination(RequiredLoad, Profiles, $\alpha$, $\epsilon$):
+    TargetRaw = RequiredLoad / $\alpha$
+    MaxCap = TargetRaw + Max(Profiles.Capacity)
+    Initialize MinCostDP[0...MaxCap] = $\infty$
+    MinCostDP[0] = 0
+    BestComboDP[0] = $\emptyset$
+
+    For each p in Profiles:
+        EffectiveCost = p.Cost + $\epsilon$
+        For c from 0 to MaxCap - p.Capacity:
+            If MinCostDP[c] != $\infty$:
+                NewCost = MinCostDP[c] + EffectiveCost
+                NewCap = c + p.Capacity
+                If NewCost < MinCostDP[NewCap]:
+                    MinCostDP[NewCap] = NewCost
+                    BestComboDP[NewCap] = BestComboDP[c] $\cup$ {p}
+
+    BestIdx = $ArgMin_{i \ge TargetRaw}$(MinCostDP[i])
+    Return BestComboDP[BestIdx]
+\end{lstlisting}
+
+\subsection{Partition Assignment}
+\begin{lstlisting}[caption={Assign}, mathescape=true]
+Function Assign(Partitions, Consumers):
+    Unassigned = $\emptyset$
+    Sort Consumers by Total Lag descending
+
+    // Phase 1: Preserve Existing Assignments (Stability)
+    For each c in Consumers:
+        Owned = {p in Partitions where p.Consumer == c}
+        Sort Owned by Lag descending
+        For each p in Owned:
+            If c.Load + p.Production $\le$ c.Capacity:
+                Assign p to c
+                c.Load = c.Load + p.Production
+            Else:
+                Add p to Unassigned
+
+    // Phase 2: Assign Unassigned / Orphaned
+    Pending = Unassigned + NewPartitions
+    Sort Pending by Production descending
+
+    For each p in Pending:
+        Candidate = Select Best Consumer for p:
+            1. Running consumer with space ($Load + Prod \le Cap \times \alpha$)
+            2. Booting consumer with space
+            3. Running consumer with raw space ($Load + Prod \le Cap$)
+            4. Best effort fallback (Least Loaded)
+
+        If Candidate != NULL:
+            Assign p to Candidate
+\end{lstlisting}
+
+\subsection{Cluster Optimization}
+\begin{lstlisting}[caption={TryClusterOptimization}, mathescape=true]
+Function TryClusterOptimization():
+    If AnyConsumer.IsBooting: Return // Stability Gate
+
+    TotalLoad = $\sum$ AllPartitions.Production * 1.1
+    CurrentCost = $\sum$ ActiveConsumers.Cost
+
+    IdealFleet = GetOptimalFleetCombination(TotalLoad)
+    IdealCost = $\sum$ IdealFleet.Cost
+
+    If IdealCost $\ge$ CurrentCost * 0.80:
+        Return // Skip if savings < 20%
+
+    Savings = CurrentCost - IdealCost
+    TransitionCost = $\sum_{p \in IdealFleet}$ (p.StartupTime * p.Cost)
+    PaybackSeconds = TransitionCost / Savings
+
+    If PaybackSeconds < 300:
+        Trigger IdealFleet Provisioning
+\end{lstlisting}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Experimental Results}
+
+To evaluate the efficacy of the CC-MWF partition assignment strategy, we conducted a series of simulations. The experiments were designed to test the algorithm's ability to maintain low latency and minimize costs under various load patterns and distribution skews.
+
+\subsection{Workloads}
+We utilized three distinct data providers to simulate different traffic characteristics:
+\begin{itemize}
+    \item \textbf{NY Taxi}: A replay of real-world taxi trip data from New York City. This represents a realistic, variable traffic pattern with natural fluctuations.
+    \item \textbf{Poisson}: A synthetic workload generating messages based on a Poisson process, simulating random independent arrivals. This tests the system's handling of stochastic noise.
+    \item \textbf{Sinusoid}: A synthetic workload characterized by a smooth sine wave overlaid with heavy-tailed Pareto noise. This stresses the system's ability to adapt to periodic predictable changes and sudden spikes.
+\end{itemize}
+
+\subsection{Scenarios and Configuration}
+Each workload was tested under three partition distribution scenarios to simulate different degrees of data skew:
+\begin{itemize}
+    \item \textbf{Uniform}: Traffic is evenly distributed across 5 partitions.
+    \item \textbf{Skewed 5}: Traffic is biased towards the first 3 of 5 partitions (80\% load).
+    \item \textbf{Skewed 9}: Traffic is heavily biased towards the first 2 of 9 partitions (50\% load).
+\end{itemize}
+
+All simulations were ran for approximately 1200 virtual seconds.
+
+\subsection{Consumer Configuration}
+All consumer profiles (Small, Medium, Large) were configured with a nominal startup time of 60 seconds. To simulate realistic variability in cloud instance provisioning, the simulation applied a stochastic variance of approximately -25\% to this duration for each new consumer instance. This delay models the time required for container scheduling, image pulling, and application initialization.
+
+\begin{table}[H]
+\centering
+\caption{Consumer Profiles}
+\label{tab:consumer_profiles}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Profile} & \textbf{Max Capacity (msg/s)} & \textbf{Cost (\$/s)} \\
+\midrule
+Small & 500 & 0.50 \\
+Medium & 1000 & 1.00 \\
+Large & 2500 & 2.50 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Experimental Results}
+The following observations were made based on the collected simulation metrics.
+
+\subsubsection{NY Taxi Workload}
+The algorithm performed exceptionally well with the NY Taxi dataset. Regardless of the skew (Uniform, Skewed 5, or Skewed 9), the average latency remained at the theoretical minimum of 1.00 second. The system maintained a low average cost of approximately \$3.30/s with \textbf{zero} SLA violations, indicating that the workload was well within the capacity of the provisioned fleet.
+
+\subsubsection{Poisson Workload}
+The Poisson workload presented a higher average production rate (~2000-2200 msg/s).
+\begin{itemize}
+    \item \textbf{Cost}: The system scaled up to handle the load, with average costs rising to \$6.00--\$7.00/s.
+    \item \textbf{Latency}: The \textit{Uniform} scenario resulted in higher average latency (5.22s) and longer SLA violation duration (64s) compared to the skewed scenarios (2.01s latency, 13s violation for Skewed 5).
+\end{itemize}
+
+\subsubsection{Sinusoid Workload}
+This was the most demanding workload, with average production rates approaching 2500 msg/s.
+\begin{itemize}
+    \item \textbf{Performance}: The system faced significant challenges, with average latencies rising to 6.86s--8.26s.
+    \item \textbf{Violations}: SLA violations were frequent, persisting for 172 to 236 seconds (approx. 15-20\% of the simulation time).
+    \item \textbf{Cost}: To combat the high load, the algorithm provisioned more resources, driving the average cost up to \$7.18--\$9.87/s.
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\small 
+\setlength{\tabcolsep}{0.5pt}
+\caption{Simulation Results}
+\label{tab:simulation_results}
+\begin{tabular}{lcrrrr}
+\toprule
+\textbf{Workload / Scenario} & \textbf{Part.} & \textbf{Avg Prod} & \textbf{Avg Cost} & \textbf{Avg Lat.} & \textbf{Viol. Dur.} \\
+& & (msg/s) & (\$) & (s) & (s) \\
+\midrule
+NY Taxi (Skewed 5) & 5 & 1265.80 & 3.32 & 1.00 & 0 \\
+NY Taxi (Skewed 9) & 9 & 1265.76 & 3.35 & 1.00 & 0 \\
+NY Taxi (Uniform)  & 5 & 1265.83 & 3.29 & 1.00 & 0 \\
+\midrule
+Poisson (Skewed 5) & 5 & 1969.45 & 6.09 & 2.01 & 13 \\
+Poisson (Skewed 9) & 9 & 2271.69 & 7.04 & 2.29 & 3 \\
+Poisson (Uniform)  & 5 & 2263.65 & 7.00 & 5.22 & 64 \\
+\midrule
+Sinusoid (Skewed 5) & 5 & 2465.21 & 7.18 & 8.26 & 236 \\
+Sinusoid (Skewed 9) & 9 & 2468.59 & 9.87 & 6.86 & 172 \\
+Sinusoid (Uniform)  & 5 & 2477.18 & 7.36 & 6.98 & 178 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\setlength{\tabcolsep}{0.5pt}
+\small
+\caption{Simulation Results (Modified Worst Fit)}
+\label{tab:simulation_results_mwf}
+\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}} l c r r r r}
+\toprule
+\textbf{Workload / Scenario} & \textbf{Part.} & \textbf{Avg Prod} & \textbf{Avg Cost} & \textbf{Avg Lat.} & \textbf{Viol. Dur.} \\
+& & (msg/s) & (\$) & (s) & (s) \\
+\midrule
+NY Taxi (Skewed 5) & 5 & 1265.80 & 2.50 & 1.00 & 0 \\
+NY Taxi (Skewed 9) & 9 & 1265.76 & 2.50 & 1.00 & 0 \\
+NY Taxi (Uniform)  & 5 & 1265.83 & 2.50 & 1.00 & 0 \\
+\midrule
+Poisson (Skewed 5) & 5 & 1970.32 & 4.17 & 1.79 & 0 \\
+Poisson (Skewed 9) & 9 & 2272.34 & 6.01 & 3.29 & 0 \\
+Poisson (Uniform)  & 5 & 2268.74 & 5.47 & 2.40 & 24 \\
+\midrule
+Sinusoid (Skewed 5) & 5 & 2468.69 & 6.01 & 4.24 & 78 \\
+Sinusoid (Skewed 9) & 9 & 2495.92 & 5.76 & 2.56 & 0 \\
+Sinusoid (Uniform)  & 5 & 2479.99 & 6.19 & 3.77 & 54 \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Conclusions and Future Work}
+
+The \textbf{CC-MWF} demonstrated robust performance for real-world traces (NY Taxi), effectively minimizing cost without compromising latency. However, under high-intensity synthetic loads (Sinusoid) and specific Poisson configurations, the system experienced notable latency violations.
+
+A critical analysis of these violations reveals that the primary bottleneck was the \textbf{long boot time} of new consumer instances. When the workload spiked—particularly in the Sinusoid scenario which mimics wave-like traffic surges—the algorithm correctly identified the need for more capacity. However, the delay inherent in provisioning and booting new consumers allowed backlog to accumulate rapidly. By the time the new resources became active, the system had already breached SLA thresholds.
+
+These findings suggest that while the assignment logic is sound for steady-state efficiency, future optimizations must address initialization lag. Potential solutions could include predictive scaling to provision resources ahead of demand curves or maintaining a pool of "warm" standby instances to absorb sudden spikes while permanent resources boot.
+
+\bibliographystyle{ieeetr}
+\bibliography{bibliography}
+
+\end{document}

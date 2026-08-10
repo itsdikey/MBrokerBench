@@ -222,7 +222,10 @@ namespace MBrokerBench
             // Start metrics endpoint with strategy/run labels (from environment)
             var strategyEnv = assignmentStrategy.GetType().Name;
             var runIdEnv = System.Environment.GetEnvironmentVariable("RUN_ID") ?? DateTimeOffset.UtcNow.Subtract(DateTimeOffset.UnixEpoch).TotalSeconds.ToString();//current unix epoch 
-            MetricsExporter.Init(1234, strategyEnv, runIdEnv);
+            if (System.Environment.GetEnvironmentVariable("PRODUCER_MODE") != "true")
+            {
+                MetricsExporter.Init(1234, strategyEnv, runIdEnv);
+            }
 
             // Use JSON config data provider to initialize partitions and handle rate/events
             var configPath = Path.Combine(AppContext.BaseDirectory, "simulation_config.json");
@@ -359,11 +362,21 @@ namespace MBrokerBench
                 { "Large", "mbroker-consumer-large" }
             };
 
+            // Feature flag: manual partition assignment via ConfigMap (default false — group-based Subscribe remains)
+            bool manualPartitionAssignmentEnabled =
+                System.Environment.GetEnvironmentVariable("MANUAL_PARTITION_ASSIGNMENT_ENABLED") == "true";
+            string assignmentConfigMapName =
+                System.Environment.GetEnvironmentVariable("ASSIGNMENT_CONFIG_MAP_NAME") ?? "mbroker-partition-assignments";
+
             if (isRealScaling)
             {
                 Logger.Log("REAL SCALING MODE ENABLED", LogLevel.Warning);
+                if (manualPartitionAssignmentEnabled)
+                {
+                    Logger.Log($"MANUAL PARTITION ASSIGNMENT ENABLED (ConfigMap: {assignmentConfigMapName})", LogLevel.Warning);
+                }
                 k8sController = new KubernetesScalingController();
-                
+
                 // Initial sync: read actual K8s deployment state (not our local tracking)
                 foreach (var profile in ConsumerProfiles.AllProfiles)
                 {
@@ -373,7 +386,18 @@ namespace MBrokerBench
                         Logger.Log($"[Real Scaling] Initial {profile.Name} replica count: {realCount}");
                     }
                 }
+
+                // Ensure the assignment ConfigMap exists before the first tick.
+                if (manualPartitionAssignmentEnabled)
+                {
+                    k8sController.EnsureConfigMapExistsAsync(assignmentConfigMapName).GetAwaiter().GetResult();
+                }
             }
+
+            // One-time flag: ensures the first real-mode tick gets partition assignments
+            // using fresh Kafka lag/rate data from provider.Process, avoiding a 30-second
+            // warm-up gap where partitions show as unassigned in metrics/logs/CSV.
+            bool realScalingInitialRebalanceDone = false;
             #endregion
 
             #region Plot Init
@@ -409,16 +433,89 @@ namespace MBrokerBench
                             group.SyncRealConsumers(profile.Name, realCount);
                         }
                     }
-                    
-                    // Rebalance immediately so newly synced consumers get partition assignments
-                    // before Tick() runs. Otherwise consumers have no partitions → 0 consumption.
-                    group.Rebalance();
                 }
 
                 // Let provider process rate changes / events for this timestep
                 provider.Process(group.AllPartitions, step);
 
-                var stepConsumed = group.Tick(TimeStepSeconds, simulateProduction: !isRealScaling);
+                // One-time initial rebalance using fresh Kafka lag/rate data (not stale pre-Process state).
+                // Skipping this would leave partitions unassigned for the first ~30s until the
+                // periodic Autoscale() fires, polluting the first metrics/log/CSV row.
+                if (isRealScaling && !realScalingInitialRebalanceDone && group.Consumers.Count > 0)
+                {
+                    group.Rebalance();
+                    realScalingInitialRebalanceDone = true;
+                }
+
+                long stepConsumed;
+                if (isRealScaling)
+                {
+                    group.TickRealControlOnly(TimeStepSeconds);
+                    stepConsumed = 0;
+                }
+                else
+                {
+                    stepConsumed = group.TickVirtual(TimeStepSeconds);
+                }
+
+                // 1b. Publish manual partition assignments via ConfigMap if the feature is enabled.
+                //     Mapping strategy: group synthetic consumers by profile, sort both lists,
+                //     zip pod-to-consumer by profile, publish empty arrays for extra ready pods.
+                if (isRealScaling && manualPartitionAssignmentEnabled && k8sController != null)
+                {
+                    try
+                    {
+                        var readyPods = await k8sController.ListReadyConsumerPodsAsync();
+
+                        // Build profile -> sorted pod name list
+                        var podsByProfile = readyPods
+                            .GroupBy(p => p.Profile.ToLower())
+                            .ToDictionary(g => g.Key, g => g.Select(p => p.PodName).OrderBy(n => n).ToList());
+
+                        // Build profile -> sorted active synthetic consumers
+                        var consumersByProfile = group.ActiveConsumers
+                            .GroupBy(c => c.ConsumerProfile.Name.ToLower())
+                            .ToDictionary(g => g.Key, g => g.ToList());
+
+                        var allProfiles = podsByProfile.Keys.Union(consumersByProfile.Keys).Distinct();
+                        var assignmentMap = new Dictionary<string, int[]>();
+
+                        foreach (var profile in allProfiles)
+                        {
+                            podsByProfile.TryGetValue(profile, out var podList);
+                            consumersByProfile.TryGetValue(profile, out var consumerList);
+                            var pods = podList ?? new List<string>();
+                            var consumers = consumerList ?? new List<Consumer>();
+
+                            var sortedConsumers = consumers.OrderBy(c => c.Id).ToList();
+
+                            // Zip pods to consumers 1-to-1; extra pods get empty arrays
+                            for (int i = 0; i < pods.Count; i++)
+                            {
+                                var pod = pods[i];
+                                int[] assignedPartitionIds;
+                                if (i < sortedConsumers.Count)
+                                {
+                                    assignedPartitionIds = sortedConsumers[i].AssignedPartitions
+                                        .Select(p => int.Parse(p.Id))
+                                        .OrderBy(id => id)
+                                        .ToArray();
+                                }
+                                else
+                                {
+                                    assignedPartitionIds = Array.Empty<int>();
+                                }
+                                assignmentMap[pod] = assignedPartitionIds;
+                            }
+                        }
+
+                        await k8sController.PublishPartitionAssignmentsAsync(assignmentConfigMapName, assignmentMap);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[ConfigMap] Assignment publication failed: {ex.Message}", LogLevel.Warning);
+                    }
+                }
 
                 if (isRealScaling && k8sController != null)
                 {
@@ -451,7 +548,18 @@ namespace MBrokerBench
 
                 var totalProductionRate = group.AllPartitions.Sum(p => p.ProductionRate);
                 var averageProductionRate = group.AllPartitions.Count > 0 ? totalProductionRate / group.AllPartitions.Count : 0.0;
-                var consumptionRate = stepConsumed / TimeStepSeconds;
+
+                // In real scaling mode, derive consumption rate from Kafka committed-offset deltas
+                // observed by the controller. This reflects actual consumer progress, not simulated.
+                double consumptionRate;
+                if (isRealScaling)
+                {
+                    consumptionRate = provider is KafkaDataProvider kdp ? kdp.ObservedConsumptionRate : 0;
+                }
+                else
+                {
+                    consumptionRate = stepConsumed / TimeStepSeconds;
+                }
 
                 Logger.Log("ALGORITHM: " + assignmentStrategy.GetType().Name);
 
@@ -473,7 +581,10 @@ namespace MBrokerBench
                     }
                 }
 
-                Logger.Log($"Total System Lag: {totalLag} messages. Total Production Rate: {totalProductionRate:F1} msgs/s. Total Consumption Rate: {consumptionRate:F1} msgs/s. Average Production Rate: {averageProductionRate:F1} msgs/s");
+                var consumptionRateText = isRealScaling
+                    ? $"{consumptionRate:F1} msgs/s (Kafka committed offsets)"
+                    : $"{consumptionRate:F1} msgs/s (simulated)";
+                Logger.Log($"Total System Lag: {totalLag} messages. Total Production Rate: {totalProductionRate:F1} msgs/s. Total Consumption Rate: {consumptionRateText}. Average Production Rate: {averageProductionRate:F1} msgs/s");
                 Logger.Log($"Max Estimated Latency (Worst-Case): {maxLagTime:F2} seconds (Target: {group.LatencySLASeconds}s)");
                 Logger.Log($"Total System Cost: {group.TotalCostPerSecond}");
 
@@ -504,6 +615,7 @@ namespace MBrokerBench
                 }
 
                 MetricsExporter.SetTotalProductionRate(totalProductionRate);
+                MetricsExporter.SetTotalConsumptionRate(consumptionRate);
 
                 foreach (var consumer in group.Consumers)
                 {
@@ -522,8 +634,8 @@ namespace MBrokerBench
                     //Console.WriteLine($"{consumer.Id}: Profile={consumer.ConsumerProfile.ShortCode} Messages={consumerLag:F0} Lag={lagTime:F2}s Msg Rate={consumer.GetCurrentWorkloadRate():F0} msgs/s. D={(consumer.GetCurrentWorkloadRate()-consumer.ConsumerProfile.MaxCapacity):F0} Util={utilization:F1}%. Partitions: {string.Join(", ", consumer.AssignedPartitions.Select(p => p.Id))}");
                 }
 
-                // CSV export per timestep
-                double currentConsumptionRate = stepConsumed / TimeStepSeconds;
+                // CSV export per timestep — use the already-computed consumptionRate (real or simulated)
+                double currentConsumptionRate = consumptionRate;
 
                 // total system load: approximate as production rate + queued lag per SLA window
                 double totalSystemLoad = totalProductionRate + (double)totalLag / group.LatencySLASeconds;

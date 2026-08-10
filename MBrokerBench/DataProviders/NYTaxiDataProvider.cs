@@ -1,4 +1,4 @@
-﻿using MBrokerBench.Components;
+using MBrokerBench.Components;
 using MSodaClient;
 using System.Text.Json.Serialization;
 
@@ -63,7 +63,7 @@ namespace MBrokerBench.DataProviders
 
         public List<Partition> InitializePartitions()
         {
-            int count = _scenario == "Skewed9" ? 9 : 5;
+            int count = (_scenario == "Skewed36" || _scenario == "Uniform36") ? 36 : (_scenario == "Skewed9" || _scenario == "Uniform") ? 9 : 5;
             return Enumerable.Range(0, count)
                 .Select(i => new Partition(i.ToString()))
                 .ToList();
@@ -80,6 +80,12 @@ namespace MBrokerBench.DataProviders
             var currentTrips = _allTrips.Where(t => t.PickupTime >= windowStart && t.PickupTime < windowEnd).ToList();
             int totalArrivals = currentTrips.Count * 10;
 
+            // Scale traffic for 36-partition runs
+            if (_scenario == "Skewed36" || _scenario == "Uniform36")
+            {
+                totalArrivals *= 5; // Baseline 5x, dynamically adjusted by python run scripts
+            }
+
             // 3. Distribute arrivals based on Scenarios
             for (int i = 0; i < partitions.Count; i++)
             {
@@ -95,8 +101,10 @@ namespace MBrokerBench.DataProviders
         {
             double percentage = _scenario switch
             {
-                "Skewed5" => (index < 3) ? 0.80 / 3 : 0.20 / 2,
+                "Skewed5" => (index < 2) ? 0.80 / 2 : 0.20 / 3,
                 "Skewed9" => (index < 2) ? 0.50 / 2 : 0.50 / 7,
+                "Skewed36" => (index < 8) ? 0.50 / 8 : 0.50 / 28,
+                "Uniform36" => 1.0 / total,
                 _ => 1.0 / total
             };
 

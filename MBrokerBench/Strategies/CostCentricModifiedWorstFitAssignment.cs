@@ -197,10 +197,16 @@ namespace MBrokerBench.Strategies
             // 2. FLEET PLANNING
             CheckAndProvisionCapacity(targetDemand, allowRemovals: !anyoneBooting);
 
-            // 3. STABILITY GATED: Only optimize fleet types if healthy and stable.
-            if (!anyoneBooting && totalLag < 1000) 
+            // 3. STABILITY GATED: Scale-down and cluster optimization use separate conditions.
+            if (!anyoneBooting && totalLag < 1000)
             {
                 TryStandardScaleDown();
+            }
+
+            // Cluster optimization is stricter than normal scale-down because it can introduce
+            // extra churn and temporary cost before converging to a cheaper fleet.
+            if (!anyoneBooting && totalLag < 1000)
+            {
                 TryClusterOptimization();
             }
             

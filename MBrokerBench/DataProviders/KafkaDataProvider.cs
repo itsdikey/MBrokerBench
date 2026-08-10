@@ -19,6 +19,17 @@ namespace MBrokerBench.DataProviders
         private readonly Dictionary<int, long> _previousOffsets = new();
         private DateTime _lastUpdateTime = DateTime.MinValue;
 
+        // Committed-offset tracking for observed real consumption rate
+        private readonly Dictionary<int, long> _previousCommittedOffsets = new();
+        private long _lastTotalCommittedOffset = 0;
+        private DateTime _lastCommittedOffsetSampleTime = DateTime.MinValue;
+
+        /// <summary>
+        /// Controller-observed real consumption rate in msgs/s, derived from committed-offset
+        /// deltas between Process() calls. Returns 0 until a valid second sample exists.
+        /// </summary>
+        public double ObservedConsumptionRate { get; private set; }
+
         private readonly IAdminClient _adminClient;
 
         public KafkaDataProvider(string bootstrapServers, string prometheusUrl, string topic, string consumerGroup)
@@ -65,6 +76,9 @@ namespace MBrokerBench.DataProviders
                         var watermark = _pollConsumer.QueryWatermarkOffsets(new TopicPartition(_topic, pid), TimeSpan.FromSeconds(5));
                         _previousOffsets[pid] = watermark.High.Value;
                     } catch { _previousOffsets[pid] = 0; }
+
+                    // Seed committed-offset tracking so the first Process() call has a baseline
+                    _previousCommittedOffsets[pid] = 0;
                 }
 
                 return partitions;
@@ -89,18 +103,21 @@ namespace MBrokerBench.DataProviders
             try
             {
                 // Fetch all committed offsets for the target group in one go
-                var groupOffsets = _adminClient.ListConsumerGroupOffsetsAsync(new List<ConsumerGroupTopicPartitions> 
-                { 
-                    new ConsumerGroupTopicPartitions(_consumerGroup, null) 
+                var groupOffsets = _adminClient.ListConsumerGroupOffsetsAsync(new List<ConsumerGroupTopicPartitions>
+                {
+                    new ConsumerGroupTopicPartitions(_consumerGroup, null)
                 }).Result;
 
                 var offsetMap = groupOffsets.First().Partitions.ToDictionary(p => p.Partition.Value, p => p.Offset.Value);
+
+                // Accumulate committed offset deltas for ObservedConsumptionRate
+                long totalCurrentCommitted = 0;
 
                 foreach (var partition in partitions)
                 {
                     int partitionId = int.Parse(partition.Id);
 
-                    try 
+                    try
                     {
                         // Query Kafka directly for the Log End Offset (High Watermark)
                         var topicPartition = new TopicPartition(_topic, new Confluent.Kafka.Partition(partitionId));
@@ -114,6 +131,7 @@ namespace MBrokerBench.DataProviders
                         {
                             if (committedOffset < 0) committedOffset = 0;
                             partition.CurrentLag = Math.Max(0, currentRealOffset - committedOffset);
+                            totalCurrentCommitted += committedOffset;
                         }
                         else if (currentRealOffset > 0)
                         {
@@ -137,6 +155,27 @@ namespace MBrokerBench.DataProviders
                         Console.WriteLine($"[Kafka] Error polling partition {partitionId}: {ex.Message}");
                     }
                 }
+
+                // ------------------------------------------------------------
+                // ObservedConsumptionRate: committed-offset delta / elapsed seconds
+                // Skip the very first sample to avoid a spike from zero.
+                // ------------------------------------------------------------
+                if (_lastCommittedOffsetSampleTime != DateTime.MinValue)
+                {
+                    var elapsed = (now - _lastCommittedOffsetSampleTime).TotalSeconds;
+                    if (elapsed > 0)
+                    {
+                        long delta = totalCurrentCommitted - _lastTotalCommittedOffset;
+                        if (delta > 0)
+                        {
+                            ObservedConsumptionRate = delta / elapsed;
+                        }
+                        // else: no forward progress — keep previous rate (avoids flapping to 0 on momentary stalls)
+                    }
+                }
+
+                _lastTotalCommittedOffset = totalCurrentCommitted;
+                _lastCommittedOffsetSampleTime = now;
             }
             catch (Exception ex)
             {
