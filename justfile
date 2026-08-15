@@ -3,6 +3,10 @@ set shell := ["powershell.exe", "-NoProfile", "-Command"]
 # MBrokerBench Phase 0 Automation
 STRIMZI_IMAGE := "quay.io/strimzi/kafka:0.50.1-kafka-4.1.1"
 
+# Build the thesis PDF and refresh its bibliography
+build-pdf:
+	Set-Location FCUP_thesis; xelatex -interaction=nonstopmode -file-line-error main.tex; bibtex main; xelatex -interaction=nonstopmode -file-line-error main.tex; xelatex -interaction=nonstopmode -file-line-error main.tex
+
 # Run the full setup from scratch
 up: cluster-up strimzi-up kafka-up obs-up
 
