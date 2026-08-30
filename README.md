@@ -87,10 +87,6 @@ just down
 - **Logs window**: algorithm decisions and system alerts.
 - **Exit**: press `Q` to stop the simulation and close the dashboard.
 
-## Public mirror
-
-This repository is mirrored to a public repository by an automated workflow. The public mirror contains only the files listed in [PUBLIC_EXPORT.md](PUBLIC_EXPORT.md). The Kubernetes manifests used by some `justfile` recipes are not part of the mirror, so recipes such as `just up` require the full source tree. Direct commits to the public repository are overwritten by the next sync.
-
 ## License
 
 MIT. See [LICENSE](LICENSE).
