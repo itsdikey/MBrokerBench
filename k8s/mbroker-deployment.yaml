@@ -93,7 +93,7 @@ spec:
       serviceAccountName: mbrokerbench-controller
       containers:
         - name: mbrokerbench
-          image: "<REGISTRY>/mbrokerbench:latest"  # replace with your image
+          image: mbrokerbench:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 1234

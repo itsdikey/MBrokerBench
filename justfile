@@ -142,6 +142,14 @@ logs-controller:
 	kubectl logs -l app=mbrokerbench --tail=100 -f
 # Phase 2: Real Infrastructure Transition
 
+# Build the Controller Image
+build-controller:
+	docker build -t mbrokerbench:latest -f MBrokerBench/Dockerfile .
+
+# Load the image into k3d
+load-controller:
+	k3d image import mbrokerbench:latest -c mbroker-dev
+
 # Build the Consumer Agent Image
 build-consumer:
 	docker build -t mbroker-consumer:latest -f MBrokerConsumer/Dockerfile .

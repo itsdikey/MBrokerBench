@@ -79,6 +79,31 @@ Tear down the environment:
 just down
 ```
 
+## Local Kubernetes deployment
+
+To run the controller and consumers inside the local k3d cluster, build and load their images first, then deploy them. These recipes use the `mbroker-dev` cluster created by `just up`.
+
+Build and load the controller image:
+
+```powershell
+just build-controller
+just load-controller
+```
+
+Build and load the consumer image:
+
+```powershell
+just build-consumer
+just load-consumer
+```
+
+Deploy the controller and the consumers (these recipes apply the manifests under `k8s/`):
+
+```powershell
+just deploy-controller
+just deploy-consumers
+```
+
 ## Terminal dashboard
 
 - **Status window**: step count, total system lag, production and consumption rates, and total system cost.
