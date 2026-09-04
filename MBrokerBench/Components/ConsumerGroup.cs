@@ -42,6 +42,36 @@ namespace MBrokerBench.Components
         public int ScaleDownOperations => _scaleDownOperations;
         public double RScoreValue => _rScoreValue;
 
+        // ---------------------------------------------------------------------
+        // AWS Fargate cost ledger (task-level, see FargatePricing for the policy).
+        // ---------------------------------------------------------------------
+        private decimal _fargateSettledCostUsd = 0m;
+        private decimal _fargateSettledBillableSeconds = 0m;
+        private int _fargateSettledTaskCount = 0;
+
+        /// <summary>
+        /// Total Fargate monetary cost accrued so far (USD). Includes the settled cost of
+        /// terminated tasks plus the elapsed-seconds cost of tasks still alive. After
+        /// <see cref="SettleOpenTasksAtEndOfRun"/> this equals the full run aggregate.
+        /// </summary>
+        public decimal FargateTotalCostUsd =>
+            _fargateSettledCostUsd + Consumers
+                .Where(c => !c.FargateBill.IsSettled)
+                .Sum(c => c.FargateBill.AccruedCostUsd);
+
+        /// <summary>
+        /// Total billable task-seconds accrued so far. Terminated tasks contribute their
+        /// settled seconds (which include the 60-second minimum); alive tasks contribute
+        /// their elapsed seconds.
+        /// </summary>
+        public decimal FargateTotalBillableSeconds =>
+            _fargateSettledBillableSeconds + Consumers
+                .Where(c => !c.FargateBill.IsSettled)
+                .Sum(c => c.FargateBill.AccruedSeconds);
+
+        /// <summary>Number of tasks whose bill has been settled (terminated, or end-of-run).</summary>
+        public int FargateSettledTaskCount => _fargateSettledTaskCount;
+
         public ConsumerGroup(
             string groupId,
             List<Partition> partitions,
@@ -91,6 +121,11 @@ namespace MBrokerBench.Components
                 partition.AssignedConsumer = null;
                 consumer.AssignedPartitions.Remove(partition);
             }
+
+            // Simulated termination: settle this task's Fargate bill now (60-second
+            // minimum applies). The task has accrued one second per simulated second it
+            // was alive, up to the clock boundary at which it is removed.
+            SettleTaskBill(consumer);
 
             Consumers.Remove(consumer);
             _scaleDownOperations++;
@@ -204,6 +239,9 @@ namespace MBrokerBench.Components
                         p.AssignedConsumer = null;
                         c.AssignedPartitions.Remove(p);
                     }
+
+                    // Simulated termination of a real-mode task: settle its Fargate bill.
+                    SettleTaskBill(c);
                     Consumers.Remove(c);
                 }
             }
@@ -219,6 +257,18 @@ namespace MBrokerBench.Components
         private void TickShared(double timeStepSeconds)
         {
             _totalTime += timeStepSeconds;
+
+            // Fargate accrual happens at the simulated clock advance, before this tick's
+            // boot transitions and autoscale add/remove operations. Every consumer alive
+            // at this clock boundary accrues one time-step of billable seconds. Because
+            // provisioning/termination always land exactly on these clock boundaries, a
+            // task's accrued seconds equal its elapsed simulated lifetime. Lifecycle state
+            // (Booting/Syncing/Running) is irrelevant: billing is by presence only, and no
+            // image-download duration is fabricated.
+            foreach (var c in Consumers)
+            {
+                c.FargateBill.AccrueSeconds((decimal)timeStepSeconds);
+            }
 
             bool consumerCameOnline = false;
             foreach (var c in Consumers)
@@ -247,6 +297,39 @@ namespace MBrokerBench.Components
             {
                 Autoscale();
                 _lastRebalanceTime = _totalTime;
+            }
+        }
+
+        /// <summary>
+        /// Settles one task's Fargate bill and folds it into the group ledger.
+        /// Idempotent: an already-settled task is ignored.
+        /// </summary>
+        private void SettleTaskBill(Consumer consumer)
+        {
+            if (consumer.FargateBill.IsSettled)
+            {
+                return;
+            }
+
+            consumer.FargateBill.Settle();
+            _fargateSettledCostUsd += consumer.FargateBill.SettledCostUsd;
+            _fargateSettledBillableSeconds += consumer.FargateBill.SettledSeconds;
+            _fargateSettledTaskCount++;
+        }
+
+        /// <summary>
+        /// Deterministic end-of-run policy for the Fargate metric: tasks still alive at the
+        /// end of a run are treated as terminated exactly at the final tick (end of run).
+        /// Each is settled with the same rule as a mid-run termination, so the 60-second
+        /// minimum is applied and the task's accrued bill is exposed to the final tick.
+        /// The consumer objects remain in <see cref="Consumers"/> (they existed through the
+        /// final tick); only their bills are finalized. Calling this more than once is safe.
+        /// </summary>
+        public void SettleOpenTasksAtEndOfRun()
+        {
+            foreach (var consumer in Consumers.ToList())
+            {
+                SettleTaskBill(consumer);
             }
         }
 

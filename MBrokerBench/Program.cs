@@ -340,6 +340,11 @@ namespace MBrokerBench
                 headerParts.Add($"backlog_{prof.ShortCode}");
             }
 
+            // Independent AWS Fargate metric columns (appended so existing positional CSV
+            // consumers keep working unchanged).
+            headerParts.Add("fargate_cost_accrued_usd");
+            headerParts.Add("fargate_billable_task_seconds");
+
             csvWriter.WriteLine(string.Join(',', headerParts));
 
             var rndRate = new Random();
@@ -456,6 +461,16 @@ namespace MBrokerBench
                 else
                 {
                     stepConsumed = group.TickVirtual(TimeStepSeconds);
+                }
+
+                // End-of-run Fargate policy: on the final simulated tick, tasks still alive
+                // are treated as terminated at the end of the run and their bills are
+                // settled (60-second minimum applies). This makes the final per-tick
+                // accrued Fargate cost equal the final aggregate. Synthetic cost accounting
+                // (TotalCostPerSecond) is unaffected: consumers stay in the fleet snapshot.
+                if (step == maxRuntime)
+                {
+                    group.SettleOpenTasksAtEndOfRun();
                 }
 
                 // 1b. Publish manual partition assignments via ConfigMap if the feature is enabled.
@@ -710,6 +725,12 @@ namespace MBrokerBench
                     rowParts.Add(backlog.ToString("F0"));
                 }
 
+                // Independent AWS Fargate per-tick accrued cost (USD) and billable task
+                // seconds. On the final tick the end-of-run settlement has already been
+                // applied, so this equals the final aggregate.
+                rowParts.Add(group.FargateTotalCostUsd.ToString("F6"));
+                rowParts.Add(group.FargateTotalBillableSeconds.ToString("F0"));
+
                 csvWriter.WriteLine(string.Join(',', rowParts));
 
                 csvWriter.Flush();
@@ -791,8 +812,27 @@ namespace MBrokerBench
             Logger.Log($"{finalAvgProd:F2}\t{finalAvgCost:F2}\t{finalAvgLat:F2}\t{finalViolDur}");
             Logger.Log(new string('=', 60) + "\n");
 
-            // Write final summary to resultAnalytics file for later processing
-            File.WriteAllText(resultAnalytics, $"{finalAvgProd:F2},{finalAvgCost:F2},{finalAvgLat:F2},{finalViolDur}");
+            // Independent AWS Fargate metric (us-east-2 Linux/x86, snapshot 2026-09-03).
+            // Labels deliberately avoid the legacy stdout keys parsed by existing scripts
+            // ("Avg Prod", "Avg Cost", "Avg Latency", "Viol. Dur."), so those parsers keep
+            // returning the exact same synthetic values as before.
+            decimal finalFargateTotalUsd = group.FargateTotalCostUsd;
+            decimal finalFargateBillableSeconds = group.FargateTotalBillableSeconds;
+            decimal finalFargateMeanPerSecond = maxRuntime > 0 ? finalFargateTotalUsd / maxRuntime : 0m;
+
+            Logger.Log("Fargate Metric: " + FargatePricing.Region + " " + FargatePricing.Platform + ", snapshot " + FargatePricing.SnapshotDate);
+            Logger.Log($"{"Fargate Total Cost (USD):",-27} {finalFargateTotalUsd:F6}");
+            Logger.Log($"{"Fargate Mean Cost/s (USD):",-27} {finalFargateMeanPerSecond:F6}");
+            Logger.Log($"{"Fargate Billable Task Secs:",-27} {finalFargateBillableSeconds:F0}");
+            Logger.Log($"{"Fargate Tasks Settled:",-27} {group.FargateSettledTaskCount}");
+            Logger.Log(new string('=', 60));
+            Logger.Log($"FARGATE_RESULT\t{finalFargateTotalUsd:F6}\t{finalFargateMeanPerSecond:F6}\t{finalFargateBillableSeconds:F0}\t{group.FargateSettledTaskCount}");
+            Logger.Log(new string('=', 60) + "\n");
+
+            // Write final summary to resultAnalytics file for later processing.
+            // Fargate fields are appended after the legacy four so existing consumers of
+            // the first four comma-separated values remain byte-compatible.
+            File.WriteAllText(resultAnalytics, $"{finalAvgProd:F2},{finalAvgCost:F2},{finalAvgLat:F2},{finalViolDur},{finalFargateTotalUsd:F6},{finalFargateMeanPerSecond:F6},{finalFargateBillableSeconds:F0},{group.FargateSettledTaskCount}");
 
             // If we recorded the simulation, save it now
             if (provider is SimulationRecorder recorder)

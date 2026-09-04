@@ -18,6 +18,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MBrokerConsumer.Tests", "MB
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MBrokerBench.Phase2Tests", "MBrokerBench.Phase2Tests\MBrokerBench.Phase2Tests.csproj", "{4BF91D3E-0A1C-406C-B406-FEA945502E2D}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MBrokerBench.Tests", "MBrokerBench.Tests\MBrokerBench.Tests.csproj", "{173E12E5-5F45-466A-A6C5-B02120F6D76F}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -88,6 +90,18 @@ Global
 		{4BF91D3E-0A1C-406C-B406-FEA945502E2D}.Release|x64.Build.0 = Release|Any CPU
 		{4BF91D3E-0A1C-406C-B406-FEA945502E2D}.Release|x86.ActiveCfg = Release|Any CPU
 		{4BF91D3E-0A1C-406C-B406-FEA945502E2D}.Release|x86.Build.0 = Release|Any CPU
+		{173E12E5-5F45-466A-A6C5-B02120F6D76F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{173E12E5-5F45-466A-A6C5-B02120F6D76F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{173E12E5-5F45-466A-A6C5-B02120F6D76F}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{173E12E5-5F45-466A-A6C5-B02120F6D76F}.Debug|x64.Build.0 = Debug|Any CPU
+		{173E12E5-5F45-466A-A6C5-B02120F6D76F}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{173E12E5-5F45-466A-A6C5-B02120F6D76F}.Debug|x86.Build.0 = Debug|Any CPU
+		{173E12E5-5F45-466A-A6C5-B02120F6D76F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{173E12E5-5F45-466A-A6C5-B02120F6D76F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{173E12E5-5F45-466A-A6C5-B02120F6D76F}.Release|x64.ActiveCfg = Release|Any CPU
+		{173E12E5-5F45-466A-A6C5-B02120F6D76F}.Release|x64.Build.0 = Release|Any CPU
+		{173E12E5-5F45-466A-A6C5-B02120F6D76F}.Release|x86.ActiveCfg = Release|Any CPU
+		{173E12E5-5F45-466A-A6C5-B02120F6D76F}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -20,11 +20,19 @@ namespace MBrokerBench.Components
         public double Efficiency { get; internal set; } = 0.5;
         public ConsumerState State { get; set; } = ConsumerState.Booting;
 
+        /// <summary>
+        /// Per-task AWS Fargate billing ledger. Created at construction, which is the
+        /// moment of simulated provisioning; the task accrues billable seconds for every
+        /// simulated second it is alive, regardless of its lifecycle state.
+        /// </summary>
+        public FargateTaskBill FargateBill { get; }
+
         public Consumer(string id, ConsumerProfile consumerProfile)
         {
             Id = id;
             MaxCapacity = consumerProfile.MaxCapacity;
             ConsumerProfile = consumerProfile;
+            FargateBill = new FargateTaskBill(FargatePricing.GetTaskDefinition(consumerProfile.Name));
             StartupTimeRemaining =  (1 - Random.Shared.NextDouble() / 4) * consumerProfile.StartupTime; // +/- 25% variance
         }
 
