@@ -11,6 +11,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="MBrokerBench.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Content Include="simulation_config.txt">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
       <CopyToPublishDirectory>Always</CopyToPublishDirectory>

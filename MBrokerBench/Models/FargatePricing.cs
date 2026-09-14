@@ -135,6 +135,14 @@ namespace MBrokerBench.Models
             VCpus * FargatePricing.VCpuPerHour
             + MemoryGiB * FargatePricing.MemoryPerGiBPerHour
             + ExtraEphemeralStorageGiB * FargatePricing.ExtraEphemeralStoragePerGiBPerHour;
+
+        /// <summary>
+        /// Continuous USD per second for one task of this size
+        /// (<c>HourlyRate / 3600</c>). This is the value exposed to the controller in
+        /// Fargate-aware mode. It deliberately excludes the 60-second invoice minimum,
+        /// which is applied only when the per-task ledger is settled for reporting.
+        /// </summary>
+        public decimal PerSecondRate => HourlyRate / FargatePricing.SecondsPerHour;
     }
 
     /// <summary>

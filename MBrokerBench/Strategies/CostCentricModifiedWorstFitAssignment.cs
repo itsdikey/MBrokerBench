@@ -12,17 +12,27 @@ namespace MBrokerBench.Strategies
         private const double CapacityExcessFactor = 5 / (double)6; // Safety buffer
         public double SLA => ConsumerGroup?.LatencySLASeconds ?? 10;
 
-        // Penalty per node to favor consolidation (avoid fragmentation).
-        // Costs: Small=0.5, Medium=1.0, Large=2.5.
-        // Penalty 0.01 means:
-        // 2 Small ($1.02) vs 1 Medium ($1.01) -> Medium wins slightly.
-        // 5 Medium ($5.05) vs 2 Large ($5.02) -> Large wins slightly.
-        private const double NodeCountPenalty = 0.01;
+        // Penalty per node to favour consolidation (avoid fragmentation). It is expressed
+        // relative to the cheapest profile's per-second cost so it stays a deliberately
+        // small secondary tie-breaker under any cost model.
+        //
+        // With the legacy synthetic profiles (cheapest = Small at 0.5 USD/s) this evaluates
+        // to exactly the original 0.01, so default behaviour is unchanged. In Fargate-aware
+        // mode the profile costs are ~1e-5 USD/s, so the penalty scales down with them rather
+        // than dominating the optimisation and collapsing selection to the fewest nodes.
+        private const double NodeCountPenaltyReferenceCost = 0.5;    // legacy synthetic Small cost
+        private const double NodeCountPenaltyAtReferenceCost = 0.01; // original penalty value
+
+        internal double NodeCountPenalty =>
+            ConsumerGroup is { ConsumerProfiles.Count: > 0 }
+                ? NodeCountPenaltyAtReferenceCost
+                  * (ConsumerGroup.ConsumerProfiles.Min(p => p.CostPerSecond) / NodeCountPenaltyReferenceCost)
+                : NodeCountPenaltyAtReferenceCost;
 
         /// <summary>
         /// Finds the optimal combination of profiles to satisfy the required capacity at minimum cost.
         /// </summary>
-        private List<ConsumerProfile> GetOptimalFleetCombination(double requiredLoad, double minProfileCapacity = 0)
+        internal List<ConsumerProfile> GetOptimalFleetCombination(double requiredLoad, double minProfileCapacity = 0)
         {
             if (ConsumerGroup == null || !ConsumerGroup.ConsumerProfiles.Any() || requiredLoad <= 0) 
                 return new List<ConsumerProfile>();

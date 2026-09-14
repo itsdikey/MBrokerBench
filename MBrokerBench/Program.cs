@@ -219,6 +219,19 @@ namespace MBrokerBench
             
             Logger.Log($"Selected Strategy: {assignmentStrategy.GetType().Name}");
 
+            // Consumer-profile cost basis. Defaults to the legacy synthetic scores so the
+            // original experiments and artifacts are unchanged. PROFILE_COST_MODE=fargate is
+            // the explicit opt-in that makes the controller optimise continuous AWS Fargate
+            // on-demand rates. The 60-second invoice minimum is never part of this basis; it
+            // is applied only by the per-task ledger when final Fargate cost is reported.
+            var profileCostModel = ConsumerProfiles.ParseCostModel(
+                System.Environment.GetEnvironmentVariable("PROFILE_COST_MODE"));
+            var consumerProfiles = ConsumerProfiles.GetProfiles(profileCostModel);
+            var defaultConsumerProfile = ConsumerProfiles.GetDefaultProfile(profileCostModel);
+            Logger.Log(profileCostModel == ProfileCostModel.Fargate
+                ? "Consumer profile cost model: Fargate (continuous AWS Fargate on-demand rates)"
+                : "Consumer profile cost model: Synthetic (legacy cost scores)");
+
             // Start metrics endpoint with strategy/run labels (from environment)
             var strategyEnv = assignmentStrategy.GetType().Name;
             var runIdEnv = System.Environment.GetEnvironmentVariable("RUN_ID") ?? DateTimeOffset.UtcNow.Subtract(DateTimeOffset.UnixEpoch).TotalSeconds.ToString();//current unix epoch 
@@ -297,7 +310,7 @@ namespace MBrokerBench
             string resultAnalytics = Path.Combine(outDir, $"analysis_{shortCodeAlgorithm}_{providerName}.csv");
 
             // Initialize consumer group
-            var group = new ConsumerGroup("MyGroup", partitions, ConsumerProfiles.AllProfiles, ConsumerProfiles.Large, assignmentStrategy);
+            var group = new ConsumerGroup("MyGroup", partitions, consumerProfiles, defaultConsumerProfile, assignmentStrategy);
             var csvPath = Path.Combine(outDir, $"timeseries_{strategyEnv}_{runIdEnv}.csv");
             using var csvWriter = new StreamWriter(csvPath, false, Encoding.UTF8);
 
@@ -827,6 +840,16 @@ namespace MBrokerBench
             Logger.Log($"{"Fargate Tasks Settled:",-27} {group.FargateSettledTaskCount}");
             Logger.Log(new string('=', 60));
             Logger.Log($"FARGATE_RESULT\t{finalFargateTotalUsd:F6}\t{finalFargateMeanPerSecond:F6}\t{finalFargateBillableSeconds:F0}\t{group.FargateSettledTaskCount}");
+
+            // In Fargate-aware mode the controller's own continuous cost basis is tiny
+            // (~1e-5 USD/s) and is invisible at the 2-decimal legacy "Avg Cost" precision.
+            // Emit it at high precision under a distinct, non-legacy key so the campaign CSV
+            // can audit the exact cost basis the controller optimised. Default mode emits
+            // nothing extra, keeping legacy stdout unchanged.
+            if (profileCostModel == ProfileCostModel.Fargate)
+            {
+                Logger.Log($"FARGATE_AWARE_CONTROLLER_COST\t{finalAvgCost:F9}");
+            }
             Logger.Log(new string('=', 60) + "\n");
 
             // Write final summary to resultAnalytics file for later processing.
