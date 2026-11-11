@@ -7,6 +7,14 @@ STRIMZI_IMAGE := "quay.io/strimzi/kafka:0.50.1-kafka-4.1.1"
 build-pdf:
 	Set-Location FCUP_thesis; xelatex -interaction=nonstopmode -file-line-error main.tex; bibtex main; xelatex -interaction=nonstopmode -file-line-error main.tex; xelatex -interaction=nonstopmode -file-line-error main.tex
 
+# Open the generated defense deck PDF without rebuilding it
+pdf:
+	Start-Process (Resolve-Path 'defense-deck/defense-deck.pdf').Path
+
+# Open the interactive thesis defense slides
+slides:
+	npx hyperframes@0.8.203 present ./defense-deck
+
 # Run the full setup from scratch
 up: cluster-up strimzi-up kafka-up obs-up
 
